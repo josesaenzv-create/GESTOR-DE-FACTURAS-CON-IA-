@@ -1,0 +1,6 @@
+{
+  "name": "CREDIBAN PERÚ • Control de Gastos e Inteligencia de Facturas",
+  "description": "Sistema corporativo de control de gastos, escáner IA de facturas, buscador de proveedores por RUC y enrutamiento GPS para CREDIBAN PERU S.A.C.",
+  "requestFramePermissions": ["camera", "geolocation"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
