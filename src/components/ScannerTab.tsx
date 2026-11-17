@@ -12,6 +12,8 @@ import {
   RotateCw,
   SlidersHorizontal,
   Check,
+  Loader2,
+  Eye,
 } from 'lucide-react';
 import {
   MONTH_NAMES,
@@ -37,6 +39,7 @@ import {
   DEFAULT_IMAGE_EDITS,
   processEditedInvoiceImage,
   processInvoiceImageFile,
+  renderLivePreviewDataUrl,
   saveHdPhotoLocally,
   type DirectoryHandleLike,
   type ImageEditSettings,
@@ -72,9 +75,16 @@ export const ScannerTab: React.FC<ScannerTabProps> = ({
   const [images, setImages] = useState<ProcessedInvoiceImages | null>(null);
   const [showEditor, setShowEditor] = useState(false);
   const [edits, setEdits] = useState<ImageEditSettings>(DEFAULT_IMAGE_EDITS);
+  const [livePreview, setLivePreview] = useState<{
+    dataUrl: string;
+    hdWidth: number;
+    hdHeight: number;
+  } | null>(null);
+  const [compareOriginal, setCompareOriginal] = useState(false);
   const [applyingEdit, setApplyingEdit] = useState(false);
   const [dirHandle, setDirHandle] = useState<DirectoryHandleLike | null>(null);
   const [scanningAi, setScanningAi] = useState(false);
+  const [scanProgress, setScanProgress] = useState<{ pct: number; step: string } | null>(null);
   const [aiMessage, setAiMessage] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
   const [aiScore, setAiScore] = useState<number | null>(null);
 
@@ -90,6 +100,10 @@ export const ScannerTab: React.FC<ScannerTabProps> = ({
   const [ruc, setRuc] = useState('');
   const [razonSocial, setRazonSocial] = useState('');
   const [nombreComercial, setNombreComercial] = useState('');
+  const [titularCuenta, setTitularCuenta] = useState('');
+  const [numeroOperacion, setNumeroOperacion] = useState('');
+  const [entidadPago, setEntidadPago] = useState('YAPE');
+  const [telefonoCuenta, setTelefonoCuenta] = useState('');
   const [totalStr, setTotalStr] = useState('');
   const [subtotalStr, setSubtotalStr] = useState('');
   const [igvStr, setIgvStr] = useState('');
@@ -103,6 +117,10 @@ export const ScannerTab: React.FC<ScannerTabProps> = ({
   const [saveFeedback, setSaveFeedback] = useState<{ type: 'ok' | 'err'; text: string } | null>(
     null
   );
+
+  const isDigitalTransfer = tipoComprobante === 'YAPE / PLIN / TRANSFERENCIA';
+  const isInternalReceipt =
+    tipoComprobante === 'RECIBO DE CAJA' || tipoComprobante === 'RECIBO DE MOVILIDAD';
 
   // Filter criteria options dynamically by selected naturaleza
   const criteriaForNature = useMemo(
@@ -175,12 +193,23 @@ export const ScannerTab: React.FC<ScannerTabProps> = ({
     setAiMessage(null);
     setSaveFeedback(null);
     setEdits(DEFAULT_IMAGE_EDITS);
+    setLivePreview(null);
+    setCompareOriginal(false);
+    setScanningAi(true);
+    setScanProgress({ pct: 10, step: 'Optimizando imagen en máxima calidad HD...' });
     try {
       const processed = await processInvoiceImageFile(file);
       setImages(processed);
-      setShowEditor(true); // Immediately allow cropping/filters even while AI analyzes
+      setLivePreview({
+        dataUrl: processed.hdDataUrl,
+        hdWidth: processed.width,
+        hdHeight: processed.height,
+      });
+      setShowEditor(true); // Immediately allow cropping/filters while AI/OCR analyzes
       await runGeminiAnalysis(processed.iaBase64, processed.iaDataUrl);
     } catch (err) {
+      setScanningAi(false);
+      setScanProgress(null);
       setAiMessage({
         type: 'err',
         text: err instanceof Error ? err.message : 'Error procesando imagen.',
@@ -195,6 +224,7 @@ export const ScannerTab: React.FC<ScannerTabProps> = ({
     const targetDataUrl = dataUrlToScan || images?.iaDataUrl;
     if (!targetBase64) return;
     setScanningAi(true);
+    setScanProgress({ pct: 14, step: 'Preparando lectura de comprobante...' });
     setAiMessage(null);
 
     try {
@@ -203,9 +233,13 @@ export const ScannerTab: React.FC<ScannerTabProps> = ({
         imageDataUrl: targetDataUrl,
         mimeType: 'image/jpeg',
         criteria,
+        expectedTipo: tipoComprobante,
+        onProgress: (pct, step) => {
+          setScanProgress({ pct, step });
+        },
       });
 
-      const nextTipo = (result.tipoComprobante || 'FACTURA') as TipoComprobante;
+      const nextTipo = (result.tipoComprobante || tipoComprobante || 'FACTURA') as TipoComprobante;
       setTipoComprobante(nextTipo);
       if (result.numeroComprobante) setNumeroComprobante(result.numeroComprobante);
       if (result.fechaEmision) {
@@ -216,6 +250,10 @@ export const ScannerTab: React.FC<ScannerTabProps> = ({
       if (result.ruc) setRuc(result.ruc.replace(/\D/g, ''));
       if (result.razonSocial) setRazonSocial(result.razonSocial);
       if (result.nombreComercial) setNombreComercial(result.nombreComercial);
+      if (result.titularCuenta) setTitularCuenta(result.titularCuenta);
+      if (result.numeroOperacion) setNumeroOperacion(result.numeroOperacion);
+      if (result.entidadPago) setEntidadPago(result.entidadPago);
+      if (result.telefonoCuenta) setTelefonoCuenta(result.telefonoCuenta);
       if (result.total > 0) {
         setTotalStr(result.total.toFixed(2));
         setSubtotalStr(result.subtotal.toFixed(2));
@@ -248,8 +286,49 @@ export const ScannerTab: React.FC<ScannerTabProps> = ({
       });
     } finally {
       setScanningAi(false);
+      setScanProgress(null);
     }
   };
+
+  // Real-time rendered preview (shows exact crop, rotation & B/W/contrast result live)
+  // plus automatic background HD synchronization so saved file always matches preview
+  const originalUrl = images?.originalDataUrl;
+  useEffect(() => {
+    if (!originalUrl) return;
+    let cancelled = false;
+
+    const previewTimer = setTimeout(async () => {
+      try {
+        const rendered = await renderLivePreviewDataUrl(originalUrl, edits, 1200, 0.9);
+        if (!cancelled) {
+          setLivePreview({
+            dataUrl: rendered.dataUrl,
+            hdWidth: rendered.hdWidth,
+            hdHeight: rendered.hdHeight,
+          });
+        }
+      } catch {
+        // ignore transient errors
+      }
+    }, 65);
+
+    const hdTimer = setTimeout(async () => {
+      try {
+        const updated = await processEditedInvoiceImage(originalUrl, edits);
+        if (!cancelled) {
+          setImages(updated);
+        }
+      } catch {
+        // ignore
+      }
+    }, 320);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(previewTimer);
+      clearTimeout(hdTimer);
+    };
+  }, [originalUrl, edits]);
 
   const handleApplyImageEdits = async (andRescan = false) => {
     if (!images?.originalDataUrl) return;
@@ -257,6 +336,11 @@ export const ScannerTab: React.FC<ScannerTabProps> = ({
     try {
       const updated = await processEditedInvoiceImage(images.originalDataUrl, edits);
       setImages(updated);
+      setLivePreview({
+        dataUrl: updated.hdDataUrl,
+        hdWidth: updated.width,
+        hdHeight: updated.height,
+      });
       if (andRescan) {
         await runGeminiAnalysis(updated.iaBase64, updated.iaDataUrl);
       }
@@ -288,10 +372,19 @@ export const ScannerTab: React.FC<ScannerTabProps> = ({
     e.preventDefault();
     setSaveFeedback(null);
 
-    if (!razonSocial.trim() || numericTotal <= 0) {
+    const effectiveRazon = (isDigitalTransfer ? titularCuenta || razonSocial : razonSocial).trim();
+    const effectiveNumero = (
+      isDigitalTransfer
+        ? numeroComprobante || (numeroOperacion ? `OP-${numeroOperacion}` : '')
+        : numeroComprobante
+    ).trim();
+
+    if (!effectiveRazon || numericTotal <= 0) {
       setSaveFeedback({
         type: 'err',
-        text: 'Completa la Razón Social y un Monto Total mayor a S/ 0.00.',
+        text: isDigitalTransfer
+          ? 'Completa el Titular de Cuenta y un Monto Total mayor a S/ 0.00.'
+          : 'Completa la Razón Social / Beneficiario y un Monto Total mayor a S/ 0.00.',
       });
       return;
     }
@@ -302,7 +395,7 @@ export const ScannerTab: React.FC<ScannerTabProps> = ({
       const filename = buildStandardPhotoFilename(
         newId,
         tipoComprobante,
-        numeroComprobante || 'SN',
+        effectiveNumero || 'SN',
         ruc || '00000000000',
         fechaEmision
       );
@@ -312,8 +405,8 @@ export const ScannerTab: React.FC<ScannerTabProps> = ({
         localSavedVia = await saveHdPhotoLocally(images.hdDataUrl, filename, dirHandle);
       }
 
-      const subtotal = parseFloat(subtotalStr) || 0;
-      const igv = parseFloat(igvStr) || 0;
+      const subtotal = isDigitalTransfer || isInternalReceipt ? numericTotal : parseFloat(subtotalStr) || 0;
+      const igv = isDigitalTransfer || isInternalReceipt ? 0 : parseFloat(igvStr) || 0;
 
       const record: ExpenseRecord = {
         id: newId,
@@ -326,17 +419,24 @@ export const ScannerTab: React.FC<ScannerTabProps> = ({
         categoriaPrincipal: categoriaPrincipal || categoriaForms,
         subtipo: subtipo || 'General',
         tipoComprobante,
-        numeroComprobante: numeroComprobante.trim().toUpperCase(),
+        numeroComprobante: effectiveNumero.toUpperCase(),
         ruc: ruc.trim(),
-        razonSocial: razonSocial.trim(),
-        nombreComercial: (nombreComercial || razonSocial).trim(),
+        razonSocial: effectiveRazon,
+        nombreComercial: (
+          nombreComercial ||
+          (isDigitalTransfer ? `${entidadPago || 'YAPE'} - ${effectiveRazon}` : effectiveRazon)
+        ).trim(),
         subtotal,
         igv,
         total: numericTotal,
-        descripcion: descripcion.trim() || `${categoriaForms} - ${razonSocial.trim()}`,
+        descripcion: descripcion.trim() || `${categoriaForms} - ${effectiveRazon}`,
         nivelImpacto: impactLevel,
         responsable: user.usuario,
         cargoUsuario: user.cargo,
+        titularCuenta: titularCuenta.trim(),
+        numeroOperacion: numeroOperacion.trim(),
+        entidadPago: isDigitalTransfer ? entidadPago.trim() : '',
+        telefonoCuenta: telefonoCuenta.trim(),
         direccionGps: '',
         coordenadasGps: '',
         linkMapa: '',
@@ -365,6 +465,9 @@ export const ScannerTab: React.FC<ScannerTabProps> = ({
       setRuc('');
       setRazonSocial('');
       setNombreComercial('');
+      setTitularCuenta('');
+      setNumeroOperacion('');
+      setTelefonoCuenta('');
       setTotalStr('');
       setSubtotalStr('');
       setIgvStr('');
@@ -380,40 +483,73 @@ export const ScannerTab: React.FC<ScannerTabProps> = ({
     }
   };
 
-  // Live CSS preview filter string inside editor before baking into Canvas
-  const liveCssFilter = useMemo(() => {
-    const brightnessPct = edits.brightness;
-    const contrastPct =
-      edits.filterMode === 'high-contrast'
-        ? Math.max(edits.contrast, 145)
-        : edits.filterMode === 'bw'
-        ? Math.max(edits.contrast, 165)
-        : edits.contrast;
-    const gray =
-      edits.filterMode === 'bw' || edits.filterMode === 'grayscale' ? 'grayscale(100%)' : '';
-    return `brightness(${brightnessPct}%) contrast(${contrastPct}%) ${gray}`.trim();
-  }, [edits]);
+  const resetEdits = () => {
+    setEdits(DEFAULT_IMAGE_EDITS);
+    setCompareOriginal(false);
+  };
+
+  const RECORD_TYPES: Array<{ value: TipoComprobante; label: string }> = [
+    { value: 'FACTURA', label: 'Factura' },
+    { value: 'BOLETA', label: 'Boleta' },
+    { value: 'YAPE / PLIN / TRANSFERENCIA', label: 'Yape / Plin / Transferencia' },
+    { value: 'RECIBO DE CAJA', label: 'Recibo de Caja' },
+    { value: 'RECIBO DE MOVILIDAD', label: 'Recibo de Movilidad' },
+    { value: 'TICKET DE VENTA', label: 'Ticket de Venta' },
+    { value: 'SOLO CAPTURA', label: 'Solo Captura' },
+  ];
 
   return (
-    <div
-      className={
-        isMobileMode
-          ? 'space-y-4'
-          : 'grid grid-cols-1 lg:grid-cols-12 gap-6 items-start'
-      }
-    >
-      {/* Left Column: Capture + Interactive Photo Editor (Crop & Filters) */}
-      <div className={isMobileMode ? 'space-y-4' : 'lg:col-span-5 space-y-5'}>
-        <div className="bg-white rounded-xl border border-slate-200 p-4 sm:p-5">
-          <div className="flex items-center justify-between gap-3 mb-4">
-            <div>
-              <h2 className="text-base font-bold text-slate-900">
-                1. Captura y Mejora de Foto HD
-              </h2>
-              <p className="text-xs text-slate-500 mt-0.5">
-                Recorta y mejora contraste mientras se lee el comprobante.
-              </p>
-            </div>
+    <div className="space-y-4">
+      {/* Step 0: Select What Is Being Registered First (Collapsible Dropdown) */}
+      <div className="bg-white rounded-xl border border-slate-200 p-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div>
+            <h2 className="text-sm font-bold text-slate-900">¿Qué vas a registrar?</h2>
+            <p className="text-xs text-slate-500">
+              Selecciona primero el tipo de documento o captura; el formulario se adaptará automáticamente.
+            </p>
+          </div>
+          <div className="sm:w-72 shrink-0">
+            <label htmlFor="scanner-record-type" className="block text-[11px] font-semibold text-slate-600 mb-1">
+              Tipo de documento a registrar
+            </label>
+            <select
+              id="scanner-record-type"
+              value={tipoComprobante}
+              onChange={(e) =>
+                handleTotalOrTipoChange(totalStr, e.target.value as TipoComprobante)
+              }
+              className="w-full px-3 py-2 text-xs font-semibold text-slate-900 bg-slate-50 border border-slate-300 rounded-lg focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#1B4332]/25"
+            >
+              {RECORD_TYPES.map((rt) => (
+                <option key={rt.value} value={rt.value}>
+                  {rt.label}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <div
+        className={
+          isMobileMode
+            ? 'space-y-4'
+            : 'grid grid-cols-1 lg:grid-cols-12 gap-6 items-start'
+        }
+      >
+        {/* Left Column: Capture + Interactive Photo Editor (Crop & Filters) */}
+        <div className={isMobileMode ? 'space-y-4' : 'lg:col-span-5 space-y-5'}>
+          <div className="bg-white rounded-xl border border-slate-200 p-4 sm:p-5">
+            <div className="flex items-center justify-between gap-3 mb-4">
+              <div>
+                <h2 className="text-base font-bold text-slate-900">
+                  1. Captura y Mejora de Foto HD
+                </h2>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Recorta y mejora contraste mientras se lee el comprobante.
+                </p>
+              </div>
             <button
               type="button"
               onClick={handleSelectDirectory}
@@ -463,45 +599,69 @@ export const ScannerTab: React.FC<ScannerTabProps> = ({
           <div className="mt-4 rounded-xl border border-dashed border-slate-300 bg-slate-50 overflow-hidden">
             {images ? (
               <div>
-                <div className="relative bg-slate-900/5 flex items-center justify-center overflow-hidden p-2">
-                  <div className="relative inline-block max-w-full">
+                {/* Real-time rendered crop/rotation/filter output OR Original comparison */}
+                <div className="relative bg-slate-900/5 flex flex-col items-center justify-center overflow-hidden p-2">
+                  <div className="w-full flex items-center justify-between px-1 pb-1.5 text-[11px]">
+                    <span className="font-semibold text-[#1B4332]">
+                      {compareOriginal
+                        ? 'Foto Original (Sin cambios)'
+                        : 'Vista Previa Final (Con cambios aplicados)'}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setCompareOriginal((v) => !v)}
+                      className="px-2 py-0.5 rounded bg-white border border-slate-300 text-slate-700 hover:bg-slate-100 font-medium inline-flex items-center gap-1 cursor-pointer"
+                    >
+                      <Eye className="w-3 h-3" />
+                      <span>{compareOriginal ? 'Ver Editada' : 'Comparar Original'}</span>
+                    </button>
+                  </div>
+                  <div className="relative inline-block max-w-full bg-white rounded border border-slate-200 shadow-xs p-1">
                     <img
-                      src={showEditor ? images.originalDataUrl : images.hdDataUrl}
-                      alt="Vista previa de comprobante"
-                      style={
-                        showEditor
-                          ? {
-                              filter: liveCssFilter,
-                              transform: `rotate(${edits.rotation}deg)`,
-                            }
-                          : undefined
+                      src={
+                        compareOriginal
+                          ? images.originalDataUrl
+                          : livePreview?.dataUrl || images.hdDataUrl
                       }
-                      className="max-h-72 w-auto object-contain mx-auto transition-transform"
+                      alt="Vista previa de comprobante"
+                      className="max-h-80 w-auto object-contain mx-auto"
                     />
-                    {/* Visual Crop Overlay when Editor is open */}
-                    {showEditor &&
-                      (edits.crop.left > 0 ||
-                        edits.crop.right > 0 ||
-                        edits.crop.top > 0 ||
-                        edits.crop.bottom > 0) && (
-                        <div
-                          aria-hidden="true"
-                          style={{
-                            left: `${edits.crop.left * 100}%`,
-                            right: `${edits.crop.right * 100}%`,
-                            top: `${edits.crop.top * 100}%`,
-                            bottom: `${edits.crop.bottom * 100}%`,
-                          }}
-                          className="absolute border-2 border-[#59B447] bg-[#59B447]/10 pointer-events-none"
-                        />
-                      )}
                   </div>
                 </div>
+
+                {/* Visible Animated Progress Indicator During Analysis */}
+                {scanningAi && scanProgress && (
+                  <div
+                    role="status"
+                    aria-live="polite"
+                    className="px-3.5 py-2.5 bg-emerald-50 border-t border-emerald-200 space-y-1.5"
+                  >
+                    <div className="flex items-center justify-between gap-2 text-xs font-semibold text-[#1B4332]">
+                      <span className="flex items-center gap-1.5 min-w-0">
+                        <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0 text-[#59B447]" />
+                        <span className="truncate">{scanProgress.step}</span>
+                      </span>
+                      <span className="font-mono tabular-nums shrink-0">{scanProgress.pct}%</span>
+                    </div>
+                    <div
+                      role="progressbar"
+                      aria-valuenow={scanProgress.pct}
+                      aria-valuemin={0}
+                      aria-valuemax={100}
+                      className="w-full h-2 bg-emerald-200/70 rounded-full overflow-hidden"
+                    >
+                      <div
+                        className="h-full bg-[#59B447] transition-all duration-300 ease-out rounded-full"
+                        style={{ width: `${Math.max(8, scanProgress.pct)}%` }}
+                      />
+                    </div>
+                  </div>
+                )}
 
                 {/* Action Bar under photo */}
                 <div className="p-3 bg-white border-t border-slate-200 flex flex-wrap items-center justify-between gap-2">
                   <span className="text-xs text-slate-600 font-mono tabular-nums">
-                    HD {images.width}×{images.height}px
+                    HD {livePreview?.hdWidth || images.width}×{livePreview?.hdHeight || images.height}px
                   </span>
                   <div className="flex items-center gap-2">
                     <button
@@ -522,8 +682,12 @@ export const ScannerTab: React.FC<ScannerTabProps> = ({
                       onClick={() => runGeminiAnalysis()}
                       className="px-3 py-1.5 bg-[#59B447] hover:bg-[#4ca13b] disabled:opacity-60 text-white text-xs font-semibold rounded-md flex items-center gap-1.5 cursor-pointer"
                     >
-                      <Sparkles className="w-3.5 h-3.5" />
-                      <span>{scanningAi ? 'Leyendo...' : 'Re-escanear'}</span>
+                      {scanningAi ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <Sparkles className="w-3.5 h-3.5" />
+                      )}
+                      <span>{scanningAi ? 'Analizando...' : 'Re-escanear'}</span>
                     </button>
                   </div>
                 </div>
@@ -534,7 +698,7 @@ export const ScannerTab: React.FC<ScannerTabProps> = ({
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <span className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
                         <Crop className="w-3.5 h-3.5 text-[#59B447]" />
-                        <span>Editor de Calidad HD</span>
+                        <span>Editor en Vivo (Calidad Máxima HD)</span>
                       </span>
                       <button
                         type="button"
@@ -689,7 +853,7 @@ export const ScannerTab: React.FC<ScannerTabProps> = ({
                     <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
                       <button
                         type="button"
-                        onClick={() => setEdits(DEFAULT_IMAGE_EDITS)}
+                        onClick={resetEdits}
                         className="px-2.5 py-1.5 text-xs text-slate-600 hover:text-slate-900 cursor-pointer"
                       >
                         Restablecer
@@ -702,7 +866,7 @@ export const ScannerTab: React.FC<ScannerTabProps> = ({
                           className="px-3 py-1.5 bg-white border border-slate-300 hover:bg-slate-100 text-slate-800 text-xs font-semibold rounded-md flex items-center gap-1 cursor-pointer"
                         >
                           <Check className="w-3.5 h-3.5 text-[#59B447]" />
-                          <span>Aplicar a Foto HD</span>
+                          <span>Confirmar HD</span>
                         </button>
                         <button
                           type="button"
@@ -710,7 +874,7 @@ export const ScannerTab: React.FC<ScannerTabProps> = ({
                           onClick={() => handleApplyImageEdits(true)}
                           className="px-3 py-1.5 bg-[#1B4332] hover:bg-[#0f291e] text-white text-xs font-semibold rounded-md cursor-pointer"
                         >
-                          Aplicar y Re-leer
+                          Confirmar y Re-leer
                         </button>
                       </div>
                     </div>
@@ -856,7 +1020,7 @@ export const ScannerTab: React.FC<ScannerTabProps> = ({
           </div>
         </div>
 
-        {/* Row 2: Tipo, Serie-Numero, Fecha Emision */}
+        {/* Row 2: Tipo, Serie-Numero / N° Operacion, Fecha Emision */}
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5">
           <div>
             <label htmlFor="form-tipo" className="block text-xs font-medium text-slate-700 mb-1">
@@ -872,27 +1036,51 @@ export const ScannerTab: React.FC<ScannerTabProps> = ({
             >
               <option value="FACTURA">FACTURA</option>
               <option value="BOLETA">BOLETA</option>
-              <option value="TICKET DE VENTA">TICKET DE VENTA</option>
+              <option value="YAPE / PLIN / TRANSFERENCIA">YAPE / PLIN / TRANSFERENCIA</option>
               <option value="RECIBO DE CAJA">RECIBO DE CAJA</option>
+              <option value="RECIBO DE MOVILIDAD">RECIBO DE MOVILIDAD</option>
+              <option value="TICKET DE VENTA">TICKET DE VENTA</option>
               <option value="SOLO CAPTURA">SOLO CAPTURA</option>
             </select>
           </div>
-          <div>
-            <label htmlFor="form-numero" className="block text-xs font-medium text-slate-700 mb-1">
-              Serie y Correlativo
-            </label>
-            <input
-              id="form-numero"
-              type="text"
-              value={numeroComprobante}
-              onChange={(e) => setNumeroComprobante(e.target.value)}
-              placeholder="F001-000456"
-              className="w-full px-3 py-2.5 text-sm font-mono bg-white border border-slate-300 rounded-lg"
-            />
-          </div>
+          {isDigitalTransfer ? (
+            <div>
+              <label
+                htmlFor="form-operacion"
+                className="block text-xs font-medium text-slate-700 mb-1"
+              >
+                N° de Operación / Transacción
+              </label>
+              <input
+                id="form-operacion"
+                type="text"
+                value={numeroOperacion}
+                onChange={(e) => {
+                  setNumeroOperacion(e.target.value);
+                  setNumeroComprobante(e.target.value ? `OP-${e.target.value}` : '');
+                }}
+                placeholder="Ej. 04829104"
+                className="w-full px-3 py-2.5 text-sm font-mono bg-white border border-slate-300 rounded-lg"
+              />
+            </div>
+          ) : (
+            <div>
+              <label htmlFor="form-numero" className="block text-xs font-medium text-slate-700 mb-1">
+                Serie y Correlativo Completo
+              </label>
+              <input
+                id="form-numero"
+                type="text"
+                value={numeroComprobante}
+                onChange={(e) => setNumeroComprobante(e.target.value)}
+                placeholder="F001-00034719"
+                className="w-full px-3 py-2.5 text-sm font-mono bg-white border border-slate-300 rounded-lg"
+              />
+            </div>
+          )}
           <div>
             <label htmlFor="form-fecha" className="block text-xs font-medium text-slate-700 mb-1">
-              Fecha de Emisión
+              Fecha de Operación / Emisión
             </label>
             <input
               id="form-fecha"
@@ -908,60 +1096,128 @@ export const ScannerTab: React.FC<ScannerTabProps> = ({
           </div>
         </div>
 
-        {/* Row 3: RUC, Razon Social, Nombre Comercial */}
-        <div className="grid grid-cols-1 sm:grid-cols-12 gap-3.5">
-          <div className="sm:col-span-4">
-            <label htmlFor="form-ruc" className="block text-xs font-medium text-slate-700 mb-1">
-              RUC / DNI Emisor
-            </label>
-            <input
-              id="form-ruc"
-              type="text"
-              inputMode="numeric"
-              value={ruc}
-              onChange={(e) => handleRucChange(e.target.value)}
-              placeholder="20100017491"
-              maxLength={11}
-              className="w-full px-3 py-2.5 text-sm font-mono tabular-nums bg-white border border-slate-300 rounded-lg"
-            />
+        {/* Row 3: Dynamic Entity Fields (Yape/Plin/Transferencia vs SUNAT Factura/Boleta) */}
+        {isDigitalTransfer ? (
+          <div className="grid grid-cols-1 sm:grid-cols-12 gap-3.5 p-3.5 bg-emerald-50/40 border border-emerald-200 rounded-xl">
+            <div className="sm:col-span-3">
+              <label
+                htmlFor="form-entidad"
+                className="block text-xs font-medium text-slate-700 mb-1"
+              >
+                Billetera / Banco
+              </label>
+              <select
+                id="form-entidad"
+                value={entidadPago}
+                onChange={(e) => setEntidadPago(e.target.value)}
+                className="w-full px-3 py-2.5 text-sm bg-white border border-slate-300 rounded-lg"
+              >
+                <option value="YAPE">YAPE</option>
+                <option value="PLIN">PLIN</option>
+                <option value="BCP">BCP</option>
+                <option value="BBVA">BBVA</option>
+                <option value="INTERBANK">INTERBANK</option>
+                <option value="SCOTIABANK">SCOTIABANK</option>
+                <option value="BANCO DE LA NACIÓN">BANCO DE LA NACIÓN</option>
+                <option value="OTRO">OTRO</option>
+              </select>
+            </div>
+            <div className="sm:col-span-6">
+              <label
+                htmlFor="form-titular"
+                className="block text-xs font-medium text-slate-700 mb-1"
+              >
+                Titular de Cuenta / Destinatario
+              </label>
+              <input
+                id="form-titular"
+                type="text"
+                required
+                value={titularCuenta || razonSocial}
+                onChange={(e) => {
+                  setTitularCuenta(e.target.value);
+                  setRazonSocial(e.target.value);
+                }}
+                placeholder="Ej. HEYDI DINA TALAVERANO"
+                className="w-full px-3 py-2.5 text-sm bg-white border border-slate-300 rounded-lg"
+              />
+            </div>
+            <div className="sm:col-span-3">
+              <label
+                htmlFor="form-telefono"
+                className="block text-xs font-medium text-slate-700 mb-1"
+              >
+                Celular / N° Cuenta
+              </label>
+              <input
+                id="form-telefono"
+                type="text"
+                value={telefonoCuenta}
+                onChange={(e) => setTelefonoCuenta(e.target.value)}
+                placeholder="987654321"
+                className="w-full px-3 py-2.5 text-sm font-mono bg-white border border-slate-300 rounded-lg"
+              />
+            </div>
           </div>
-          <div className="sm:col-span-4">
-            <label htmlFor="form-razon" className="block text-xs font-medium text-slate-700 mb-1">
-              Razón Social (Legal)
-            </label>
-            <input
-              id="form-razon"
-              type="text"
-              required
-              value={razonSocial}
-              onChange={(e) => setRazonSocial(e.target.value)}
-              placeholder="PLUZ ENERGIA PERU S.A.A."
-              className="w-full px-3 py-2.5 text-sm bg-white border border-slate-300 rounded-lg"
-            />
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-12 gap-3.5">
+            <div className="sm:col-span-4">
+              <label htmlFor="form-ruc" className="block text-xs font-medium text-slate-700 mb-1">
+                {isInternalReceipt ? 'DNI / RUC Receptor' : 'RUC / DNI Emisor'}
+              </label>
+              <input
+                id="form-ruc"
+                type="text"
+                inputMode="numeric"
+                value={ruc}
+                onChange={(e) => handleRucChange(e.target.value)}
+                placeholder={isInternalReceipt ? '75258722' : '20100017491'}
+                maxLength={11}
+                className="w-full px-3 py-2.5 text-sm font-mono tabular-nums bg-white border border-slate-300 rounded-lg"
+              />
+            </div>
+            <div className="sm:col-span-4">
+              <label htmlFor="form-razon" className="block text-xs font-medium text-slate-700 mb-1">
+                {isInternalReceipt ? 'Nombre del Receptor' : 'Razón Social (Legal)'}
+              </label>
+              <input
+                id="form-razon"
+                type="text"
+                required
+                value={razonSocial}
+                onChange={(e) => setRazonSocial(e.target.value)}
+                placeholder={isInternalReceipt ? 'HEYDI DINA TALAVERANO' : 'PLUZ ENERGIA PERU S.A.A.'}
+                className="w-full px-3 py-2.5 text-sm bg-white border border-slate-300 rounded-lg"
+              />
+            </div>
+            <div className="sm:col-span-4">
+              <label
+                htmlFor="form-comercial"
+                className="block text-xs font-medium text-slate-700 mb-1"
+              >
+                Nombre Comercial / Alias
+              </label>
+              <input
+                id="form-comercial"
+                type="text"
+                value={nombreComercial}
+                onChange={(e) => setNombreComercial(e.target.value)}
+                placeholder="Pluz Energía Luz"
+                className="w-full px-3 py-2.5 text-sm bg-white border border-slate-300 rounded-lg"
+              />
+            </div>
           </div>
-          <div className="sm:col-span-4">
-            <label
-              htmlFor="form-comercial"
-              className="block text-xs font-medium text-slate-700 mb-1"
-            >
-              Nombre Comercial / Alias
-            </label>
-            <input
-              id="form-comercial"
-              type="text"
-              value={nombreComercial}
-              onChange={(e) => setNombreComercial(e.target.value)}
-              placeholder="Pluz Energía Luz"
-              className="w-full px-3 py-2.5 text-sm bg-white border border-slate-300 rounded-lg"
-            />
-          </div>
-        </div>
+        )}
 
-        {/* Row 4: Montos (Total, Subtotal, IGV 18%) */}
-        <div className="grid grid-cols-3 gap-3 p-3.5 bg-slate-50 rounded-xl border border-slate-200">
+        {/* Row 4: Montos (Total, Subtotal, IGV 18% only when relevant) */}
+        <div
+          className={`grid ${
+            tipoComprobante === 'FACTURA' ? 'grid-cols-3' : 'grid-cols-1 sm:grid-cols-2'
+          } gap-3 p-3.5 bg-slate-50 rounded-xl border border-slate-200`}
+        >
           <div>
             <label htmlFor="form-total" className="block text-xs font-semibold text-slate-800 mb-1">
-              Total (S/)
+              Monto Total (S/)
             </label>
             <input
               id="form-total"
@@ -976,38 +1232,46 @@ export const ScannerTab: React.FC<ScannerTabProps> = ({
               className="w-full px-2.5 py-2 text-sm font-mono font-bold tabular-nums bg-white border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#59B447]/30 focus:border-[#59B447]"
             />
           </div>
-          <div>
-            <label htmlFor="form-subtotal" className="block text-xs font-medium text-slate-600 mb-1">
-              Subtotal
-            </label>
-            <input
-              id="form-subtotal"
-              type="number"
-              inputMode="decimal"
-              step="0.01"
-              min="0"
-              value={subtotalStr}
-              onChange={(e) => setSubtotalStr(e.target.value)}
-              placeholder="0.00"
-              className="w-full px-2.5 py-2 text-sm font-mono tabular-nums bg-white border border-slate-300 rounded-lg"
-            />
-          </div>
-          <div>
-            <label htmlFor="form-igv" className="block text-xs font-medium text-slate-600 mb-1">
-              IGV 18%
-            </label>
-            <input
-              id="form-igv"
-              type="number"
-              inputMode="decimal"
-              step="0.01"
-              min="0"
-              value={igvStr}
-              onChange={(e) => setIgvStr(e.target.value)}
-              placeholder="0.00"
-              className="w-full px-2.5 py-2 text-sm font-mono tabular-nums bg-white border border-slate-300 rounded-lg"
-            />
-          </div>
+          {tipoComprobante === 'FACTURA' ? (
+            <>
+              <div>
+                <label htmlFor="form-subtotal" className="block text-xs font-medium text-slate-600 mb-1">
+                  Subtotal
+                </label>
+                <input
+                  id="form-subtotal"
+                  type="number"
+                  inputMode="decimal"
+                  step="0.01"
+                  min="0"
+                  value={subtotalStr}
+                  onChange={(e) => setSubtotalStr(e.target.value)}
+                  placeholder="0.00"
+                  className="w-full px-2.5 py-2 text-sm font-mono tabular-nums bg-white border border-slate-300 rounded-lg"
+                />
+              </div>
+              <div>
+                <label htmlFor="form-igv" className="block text-xs font-medium text-slate-600 mb-1">
+                  IGV 18%
+                </label>
+                <input
+                  id="form-igv"
+                  type="number"
+                  inputMode="decimal"
+                  step="0.01"
+                  min="0"
+                  value={igvStr}
+                  onChange={(e) => setIgvStr(e.target.value)}
+                  placeholder="0.00"
+                  className="w-full px-2.5 py-2 text-sm font-mono tabular-nums bg-white border border-slate-300 rounded-lg"
+                />
+              </div>
+            </>
+          ) : (
+            <div className="flex items-center text-xs text-slate-500">
+              <span>Sin desglose de IGV (exonerado / operación directa = S/ 0.00 IGV)</span>
+            </div>
+          )}
         </div>
 
         {/* Row 5: Clasificacion Contable */}
@@ -1142,6 +1406,7 @@ export const ScannerTab: React.FC<ScannerTabProps> = ({
           </button>
         </div>
       </form>
+      </div>
     </div>
   );
 };

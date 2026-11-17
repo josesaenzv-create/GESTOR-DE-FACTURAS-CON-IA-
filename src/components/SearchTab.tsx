@@ -6,9 +6,21 @@ import {
   Eye,
   X,
   Building2,
+  FileText,
+  Filter,
+  RotateCcw,
 } from 'lucide-react';
-import type { ExpenseRecord } from '../types/crediban';
-import { formatCurrencySoles } from '../utils/accounting';
+import {
+  MONTH_NAMES,
+  type ExpenseCriterion,
+  type ExpenseRecord,
+  type NaturalezaGasto,
+  type NivelImpacto,
+  type SedeRecord,
+  type UserSession,
+} from '../types/crediban';
+import { formatCurrencySoles, isManagerUser } from '../utils/accounting';
+import { filterExpensesAdvanced } from '../utils/analytics';
 import {
   buildProviderChips,
   computeProviderSummary,
@@ -16,9 +28,14 @@ import {
   matchesExpenseSearch,
   parseCsvRecords,
 } from '../utils/searchAndPivot';
+import { CustomPdfModal } from './CustomPdfModal';
 
 interface SearchTabProps {
   expenses: ExpenseRecord[];
+  sedes?: SedeRecord[];
+  criteria?: ExpenseCriterion[];
+  user?: UserSession;
+  userName?: string;
   isMobileMode?: boolean;
   onSelectExpense: (record: ExpenseRecord) => void;
   onImportCsvRecords: (records: ExpenseRecord[]) => void;
@@ -26,25 +43,126 @@ interface SearchTabProps {
 
 export const SearchTab: React.FC<SearchTabProps> = ({
   expenses,
+  sedes = [],
+  criteria = [],
+  user,
+  userName = 'USUARIO CREDIBAN',
   isMobileMode = false,
   onSelectExpense,
   onImportCsvRecords,
 }) => {
+  const isManager = user ? isManagerUser(user) : true;
+  const userSede = user?.sede || 'TODAS';
+
   const [query, setQuery] = useState('');
+  const [filterYear, setFilterYear] = useState<string>('TODOS');
+  const [filterMonth, setFilterMonth] = useState<string>('TODOS');
+  const [filterDateFrom, setFilterDateFrom] = useState<string>('');
+  const [filterDateTo, setFilterDateTo] = useState<string>('');
+  const [filterSede, setFilterSede] = useState<string>(isManager ? 'TODAS' : userSede);
+  const [filterNaturaleza, setFilterNaturaleza] = useState<'TODAS' | NaturalezaGasto>('TODAS');
+  const [filterCategoria, setFilterCategoria] = useState<string>('TODAS');
+  const [filterSubtipo, setFilterSubtipo] = useState<string>('TODOS');
+  const [filterImpact, setFilterImpact] = useState<'TODOS' | NivelImpacto>('TODOS');
+  const [showFilters, setShowFilters] = useState<boolean>(true);
   const [importMsg, setImportMsg] = useState('');
+  const [showPdfModal, setShowPdfModal] = useState(false);
   const csvInputRef = useRef<HTMLInputElement>(null);
 
-  const filtered = useMemo(
-    () => expenses.filter((r) => matchesExpenseSearch(r, query)),
-    [expenses, query]
-  );
+  const years = useMemo(() => {
+    const set = new Set(expenses.map((e) => e.anio).filter(Boolean));
+    set.add('2026');
+    return Array.from(set).sort().reverse();
+  }, [expenses]);
+
+  const categoryOptions = useMemo(() => {
+    const set = new Set<string>();
+    for (const c of criteria) {
+      if (filterNaturaleza !== 'TODAS' && c.naturaleza !== filterNaturaleza) continue;
+      if (c.categoriaPrincipal) set.add(c.categoriaPrincipal);
+    }
+    for (const e of expenses) {
+      if (filterNaturaleza !== 'TODAS' && e.naturaleza !== filterNaturaleza) continue;
+      if (e.categoriaPrincipal) set.add(e.categoriaPrincipal);
+    }
+    return Array.from(set).sort();
+  }, [criteria, expenses, filterNaturaleza]);
+
+  const subtypeOptions = useMemo(() => {
+    const set = new Set<string>();
+    for (const c of criteria) {
+      if (filterNaturaleza !== 'TODAS' && c.naturaleza !== filterNaturaleza) continue;
+      if (filterCategoria !== 'TODAS' && c.categoriaPrincipal !== filterCategoria) continue;
+      if (c.subtipo) set.add(c.subtipo);
+    }
+    for (const e of expenses) {
+      if (filterNaturaleza !== 'TODAS' && e.naturaleza !== filterNaturaleza) continue;
+      if (filterCategoria !== 'TODAS' && e.categoriaPrincipal !== filterCategoria) continue;
+      if (e.subtipo) set.add(e.subtipo);
+    }
+    return Array.from(set).sort();
+  }, [criteria, expenses, filterNaturaleza, filterCategoria]);
+
+  const effectiveSede = isManager ? filterSede : userSede;
+
+  const filtered = useMemo(() => {
+    const byCriteria = filterExpensesAdvanced(expenses, {
+      anio: filterYear,
+      mes: filterMonth,
+      dateFrom: filterDateFrom || undefined,
+      dateTo: filterDateTo || undefined,
+      sede: effectiveSede,
+      impacto: filterImpact,
+      naturaleza: filterNaturaleza,
+      categoriaPrincipal: filterCategoria,
+      subtipo: filterSubtipo,
+    });
+    return byCriteria.filter((r) => matchesExpenseSearch(r, query));
+  }, [
+    expenses,
+    filterYear,
+    filterMonth,
+    filterDateFrom,
+    filterDateTo,
+    effectiveSede,
+    filterImpact,
+    filterNaturaleza,
+    filterCategoria,
+    filterSubtipo,
+    query,
+  ]);
+
+  const hasActiveFilters =
+    filterYear !== 'TODOS' ||
+    filterMonth !== 'TODOS' ||
+    Boolean(filterDateFrom) ||
+    Boolean(filterDateTo) ||
+    (isManager && filterSede !== 'TODAS') ||
+    filterNaturaleza !== 'TODAS' ||
+    filterCategoria !== 'TODAS' ||
+    filterSubtipo !== 'TODOS' ||
+    filterImpact !== 'TODOS';
+
+  const resetFilters = () => {
+    setFilterYear('TODOS');
+    setFilterMonth('TODOS');
+    setFilterDateFrom('');
+    setFilterDateTo('');
+    setFilterSede(isManager ? 'TODAS' : userSede);
+    setFilterNaturaleza('TODAS');
+    setFilterCategoria('TODAS');
+    setFilterSubtipo('TODOS');
+    setFilterImpact('TODOS');
+    setQuery('');
+  };
 
   const providerChips = useMemo(() => buildProviderChips(expenses).slice(0, 10), [expenses]);
 
   const providerSummary = useMemo(() => {
-    if (!query.trim() || filtered.length === 0) return null;
+    if ((!query.trim() && !hasActiveFilters) || filtered.length === 0) return null;
+    if (!query.trim()) return null;
     return computeProviderSummary(filtered);
-  }, [query, filtered]);
+  }, [query, hasActiveFilters, filtered]);
 
   const handleExportCsv = () => {
     const csvContent = exportExpensesToCsv(filtered);
@@ -91,7 +209,7 @@ export const SearchTab: React.FC<SearchTabProps> = ({
               Busca por RUC/DNI, Razón Social, Nombre Comercial o N° Comprobante (ej. 458).
             </p>
           </div>
-          <div className="flex items-center gap-2 shrink-0">
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
             <input
               ref={csvInputRef}
               type="file"
@@ -115,31 +233,232 @@ export const SearchTab: React.FC<SearchTabProps> = ({
               <Download className="w-3.5 h-3.5" />
               <span>Exportar CSV</span>
             </button>
+            {isManager && (
+              <button
+                type="button"
+                onClick={() => setShowPdfModal(true)}
+                className="px-3 py-2 text-xs font-semibold text-slate-800 bg-white border border-slate-300 hover:bg-slate-50 rounded-lg flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
+              >
+                <FileText className="w-3.5 h-3.5 text-red-600" />
+                <span>PDF Personalizado</span>
+              </button>
+            )}
           </div>
         </div>
 
-        {/* Live Search Bar */}
-        <div className="relative">
-          <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
-          <input
-            type="search"
-            aria-label="Buscar por RUC, razón social, nombre comercial o comprobante"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="RUC, Razón Social, Nombre Comercial, Serie/Correlativo (ej. 458)..."
-            className="w-full pl-10 pr-10 py-2.5 text-sm bg-slate-50 border border-slate-300 rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#59B447]/30 focus:border-[#59B447]"
-          />
-          {query && (
-            <button
-              type="button"
-              onClick={() => setQuery('')}
-              aria-label="Limpiar búsqueda"
-              className="p-1.5 text-slate-400 hover:text-slate-700 absolute right-2.5 top-1/2 -translate-y-1/2 cursor-pointer"
-            >
-              <X className="w-4 h-4" />
-            </button>
-          )}
+        {/* Live Search Bar + Filter Toggle */}
+        <div className="flex flex-col sm:flex-row gap-2">
+          <div className="relative flex-1">
+            <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+            <input
+              type="search"
+              aria-label="Buscar por RUC, razón social, nombre comercial o comprobante"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="RUC, Razón Social, Nombre Comercial, Serie/Correlativo (ej. 458)..."
+              className="w-full pl-10 pr-10 py-2.5 text-sm bg-slate-50 border border-slate-300 rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#59B447]/30 focus:border-[#59B447]"
+            />
+            {query && (
+              <button
+                type="button"
+                onClick={() => setQuery('')}
+                aria-label="Limpiar búsqueda"
+                className="p-1.5 text-slate-400 hover:text-slate-700 absolute right-2.5 top-1/2 -translate-y-1/2 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={() => setShowFilters((v) => !v)}
+            className={`px-3 py-2 text-xs font-semibold rounded-xl border inline-flex items-center justify-center gap-1.5 cursor-pointer shrink-0 ${
+              hasActiveFilters
+                ? 'bg-emerald-50 border-emerald-300 text-[#1B4332]'
+                : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-50'
+            }`}
+          >
+            <Filter className="w-3.5 h-3.5" />
+            <span>{showFilters ? 'Ocultar filtros' : 'Filtros'}</span>
+          </button>
         </div>
+
+        {/* Advanced Filters Strip: Mes, Rango de Fechas, Tipo y Subtipo */}
+        {showFilters && (
+          <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 space-y-2.5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="text-[11px] font-bold text-slate-700 uppercase tracking-wide">
+                Filtros de Búsqueda (Periodo, Rango de Fechas, Tipo y Subtipo)
+              </span>
+              {(hasActiveFilters || query) && (
+                <button
+                  type="button"
+                  onClick={resetFilters}
+                  className="text-[11px] font-semibold text-slate-600 hover:text-slate-900 inline-flex items-center gap-1 cursor-pointer"
+                >
+                  <RotateCcw className="w-3 h-3" />
+                  <span>Limpiar todo</span>
+                </button>
+              )}
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2.5">
+              <div>
+                <label htmlFor="search-anio" className="block text-[11px] font-medium text-slate-600 mb-1">
+                  Año
+                </label>
+                <select
+                  id="search-anio"
+                  value={filterYear}
+                  onChange={(e) => setFilterYear(e.target.value)}
+                  className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-300 rounded-lg"
+                >
+                  <option value="TODOS">Todos</option>
+                  {years.map((y) => (
+                    <option key={y} value={y}>
+                      {y}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label htmlFor="search-mes" className="block text-[11px] font-medium text-slate-600 mb-1">
+                  Mes
+                </label>
+                <select
+                  id="search-mes"
+                  value={filterMonth}
+                  onChange={(e) => setFilterMonth(e.target.value)}
+                  className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-300 rounded-lg"
+                >
+                  <option value="TODOS">Todos los meses</option>
+                  {MONTH_NAMES.map((m) => (
+                    <option key={m} value={m}>
+                      {m}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label htmlFor="search-from" className="block text-[11px] font-medium text-slate-600 mb-1">
+                  Desde fecha
+                </label>
+                <input
+                  id="search-from"
+                  type="date"
+                  value={filterDateFrom}
+                  onChange={(e) => setFilterDateFrom(e.target.value)}
+                  className="w-full px-2.5 py-1.5 text-xs font-mono bg-white border border-slate-300 rounded-lg"
+                />
+              </div>
+              <div>
+                <label htmlFor="search-to" className="block text-[11px] font-medium text-slate-600 mb-1">
+                  Hasta fecha
+                </label>
+                <input
+                  id="search-to"
+                  type="date"
+                  value={filterDateTo}
+                  onChange={(e) => setFilterDateTo(e.target.value)}
+                  className="w-full px-2.5 py-1.5 text-xs font-mono bg-white border border-slate-300 rounded-lg"
+                />
+              </div>
+              <div>
+                <label htmlFor="search-sede" className="block text-[11px] font-medium text-slate-600 mb-1">
+                  Sede
+                </label>
+                <select
+                  id="search-sede"
+                  value={effectiveSede}
+                  disabled={!isManager}
+                  onChange={(e) => setFilterSede(e.target.value)}
+                  className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-300 rounded-lg disabled:bg-slate-100"
+                >
+                  {isManager && <option value="TODAS">Todas las sedes</option>}
+                  {sedes.map((s) => (
+                    <option key={s.nombreSede} value={s.nombreSede}>
+                      {s.nombreSede}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label htmlFor="search-nat" className="block text-[11px] font-medium text-slate-600 mb-1">
+                  Tipo de Gasto
+                </label>
+                <select
+                  id="search-nat"
+                  value={filterNaturaleza}
+                  onChange={(e) => {
+                    setFilterNaturaleza(e.target.value as 'TODAS' | NaturalezaGasto);
+                    setFilterCategoria('TODAS');
+                    setFilterSubtipo('TODOS');
+                  }}
+                  className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-300 rounded-lg"
+                >
+                  <option value="TODAS">Fijo y Variable</option>
+                  <option value="Costo Fijo">Costo Fijo</option>
+                  <option value="Costo Variable">Costo Variable</option>
+                </select>
+              </div>
+              <div>
+                <label htmlFor="search-cat" className="block text-[11px] font-medium text-slate-600 mb-1">
+                  Categoría Principal
+                </label>
+                <select
+                  id="search-cat"
+                  value={filterCategoria}
+                  onChange={(e) => {
+                    setFilterCategoria(e.target.value);
+                    setFilterSubtipo('TODOS');
+                  }}
+                  className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-300 rounded-lg"
+                >
+                  <option value="TODAS">Todas las categorías</option>
+                  {categoryOptions.map((c) => (
+                    <option key={c} value={c}>
+                      {c}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label htmlFor="search-sub" className="block text-[11px] font-medium text-slate-600 mb-1">
+                  Subtipo
+                </label>
+                <select
+                  id="search-sub"
+                  value={filterSubtipo}
+                  onChange={(e) => setFilterSubtipo(e.target.value)}
+                  className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-300 rounded-lg"
+                >
+                  <option value="TODOS">Todos los subtipos</option>
+                  {subtypeOptions.map((st) => (
+                    <option key={st} value={st}>
+                      {st}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label htmlFor="search-imp" className="block text-[11px] font-medium text-slate-600 mb-1">
+                  Semáforo
+                </label>
+                <select
+                  id="search-imp"
+                  value={filterImpact}
+                  onChange={(e) => setFilterImpact(e.target.value as 'TODOS' | NivelImpacto)}
+                  className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-300 rounded-lg"
+                >
+                  <option value="TODOS">Todos</option>
+                  <option value="Regular">Regular (≤ S/ 60)</option>
+                  <option value="Medio">Medio (S/ 60 - 250)</option>
+                  <option value="Fuerte">Fuerte (&gt; S/ 250)</option>
+                </select>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Quick Provider Chips */}
         {providerChips.length > 0 && (
@@ -184,8 +503,8 @@ export const SearchTab: React.FC<SearchTabProps> = ({
         )}
       </div>
 
-      {/* Consolidated Provider Executive Summary */}
-      {providerSummary && (
+      {/* Consolidated Provider Executive Summary (Gerentes only) */}
+      {isManager && providerSummary && (
         <div className="bg-white rounded-xl border border-slate-200 p-4 sm:p-5">
           <div className="flex items-start gap-3 pb-4 border-b border-slate-200">
             <div className="w-10 h-10 rounded-lg bg-[#59B447]/15 text-[#1B4332] flex items-center justify-center shrink-0">
@@ -350,6 +669,30 @@ export const SearchTab: React.FC<SearchTabProps> = ({
           </div>
         )}
       </div>
+
+      {isManager && (
+        <CustomPdfModal
+          isOpen={showPdfModal}
+          onClose={() => setShowPdfModal(false)}
+          filteredExpenses={filtered}
+          sedes={sedes}
+          filters={{
+            anio: filterYear,
+            mes: filterMonth,
+            rangoFechas:
+              filterDateFrom || filterDateTo
+                ? `${filterDateFrom || '...'} a ${filterDateTo || '...'}`
+                : undefined,
+            sede: effectiveSede,
+            impacto: filterImpact,
+            naturaleza: filterNaturaleza,
+            categoria: filterCategoria,
+            subtipo: filterSubtipo,
+            busqueda: query.trim() || undefined,
+            generadoPor: userName.toUpperCase(),
+          }}
+        />
+      )}
     </div>
   );
 };

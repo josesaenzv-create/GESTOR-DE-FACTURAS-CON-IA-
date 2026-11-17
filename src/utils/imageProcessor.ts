@@ -49,6 +49,23 @@ export function readFileAsDataUrl(file: File): Promise<string> {
   });
 }
 
+export function computeCropRect(
+  rotW: number,
+  rotH: number,
+  crop: ImageEditSettings['crop']
+): { sx: number; sy: number; sw: number; sh: number } {
+  const safeLeft = Math.max(0, Math.min(0.45, crop.left));
+  const safeRight = Math.max(0, Math.min(0.45, crop.right));
+  const safeTop = Math.max(0, Math.min(0.45, crop.top));
+  const safeBottom = Math.max(0, Math.min(0.45, crop.bottom));
+
+  const sx = Math.round(safeLeft * rotW);
+  const sy = Math.round(safeTop * rotH);
+  const sw = Math.max(20, Math.round((1 - safeLeft - safeRight) * rotW));
+  const sh = Math.max(20, Math.round((1 - safeTop - safeBottom) * rotH));
+  return { sx, sy, sw, sh };
+}
+
 function applyPixelFilters(
   ctx: CanvasRenderingContext2D,
   width: number,
@@ -70,9 +87,9 @@ function applyPixelFilters(
   const brightFactor = brightness / 100;
   const contrastAdj =
     filterMode === 'high-contrast'
-      ? Math.max(contrast, 145)
+      ? Math.max(contrast, 138)
       : filterMode === 'bw'
-      ? Math.max(contrast, 155)
+      ? Math.max(contrast, 145)
       : contrast;
   const cFactor = (259 * (contrastAdj - 100 + 255)) / (255 * (259 - (contrastAdj - 100)));
 
@@ -88,8 +105,14 @@ function applyPixelFilters(
     if (filterMode === 'grayscale' || filterMode === 'bw') {
       let lum = 0.299 * r + 0.587 * g + 0.114 * b;
       if (filterMode === 'bw') {
-        // Crisp scanner boost: darken ink, lighten thermal paper background
-        lum = lum < 138 ? lum * 0.55 : Math.min(255, lum * 1.18 + 20);
+        // Gentle adaptive scanner curve: crisp dark ink while preserving thin digits on thermal paper
+        if (lum < 115) {
+          lum = lum * 0.48;
+        } else if (lum > 185) {
+          lum = 255;
+        } else {
+          lum = ((lum - 115) / 70) * 195 + 55;
+        }
       }
       r = lum;
       g = lum;
@@ -122,6 +145,8 @@ function renderEditedToCanvas(
   const rotCtx = rotCanvas.getContext('2d');
   if (!rotCtx) throw new Error('Error al inicializar Canvas.');
 
+  rotCtx.imageSmoothingEnabled = true;
+  rotCtx.imageSmoothingQuality = 'high';
   rotCtx.fillStyle = '#ffffff';
   rotCtx.fillRect(0, 0, rotW, rotH);
   rotCtx.translate(rotW / 2, rotH / 2);
@@ -129,12 +154,9 @@ function renderEditedToCanvas(
   rotCtx.drawImage(img, -img.width / 2, -img.height / 2);
 
   // 2. Apply crop coordinates on rotated image
-  const sx = Math.round(edits.crop.left * rotW);
-  const sy = Math.round(edits.crop.top * rotH);
-  const sw = Math.max(20, Math.round((1 - edits.crop.left - edits.crop.right) * rotW));
-  const sh = Math.max(20, Math.round((1 - edits.crop.top - edits.crop.bottom) * rotH));
+  const { sx, sy, sw, sh } = computeCropRect(rotW, rotH, edits.crop);
 
-  // 3. Scale to maxSide
+  // 3. Scale to maxSide preserving original crispness up to 2800px
   const ratio = Math.min(1, maxSide / Math.max(sw, sh));
   const outW = Math.max(1, Math.round(sw * ratio));
   const outH = Math.max(1, Math.round(sh * ratio));
@@ -145,6 +167,8 @@ function renderEditedToCanvas(
   const outCtx = outCanvas.getContext('2d');
   if (!outCtx) throw new Error('Error al inicializar Canvas de salida.');
 
+  outCtx.imageSmoothingEnabled = true;
+  outCtx.imageSmoothingQuality = 'high';
   outCtx.fillStyle = '#ffffff';
   outCtx.fillRect(0, 0, outW, outH);
   outCtx.drawImage(rotCanvas, sx, sy, sw, sh, 0, 0, outW, outH);
@@ -157,13 +181,37 @@ function renderEditedToCanvas(
   return { dataUrl, base64, width: outW, height: outH };
 }
 
+export async function renderLivePreviewDataUrl(
+  originalDataUrl: string,
+  edits: ImageEditSettings,
+  maxSide = 1200,
+  quality = 0.9
+): Promise<{ dataUrl: string; width: number; height: number; hdWidth: number; hdHeight: number }> {
+  const img = await loadImageFromSrc(originalDataUrl);
+  const swap = edits.rotation === 90 || edits.rotation === 270;
+  const rotW = swap ? img.height : img.width;
+  const rotH = swap ? img.width : img.height;
+  const { sw, sh } = computeCropRect(rotW, rotH, edits.crop);
+  const hdRatio = Math.min(1, 2800 / Math.max(sw, sh));
+  const preview = renderEditedToCanvas(img, edits, maxSide, quality);
+  return {
+    dataUrl: preview.dataUrl,
+    width: preview.width,
+    height: preview.height,
+    hdWidth: Math.max(1, Math.round(sw * hdRatio)),
+    hdHeight: Math.max(1, Math.round(sh * hdRatio)),
+  };
+}
+
 export async function processEditedInvoiceImage(
   originalDataUrl: string,
   edits: ImageEditSettings = DEFAULT_IMAGE_EDITS
 ): Promise<ProcessedInvoiceImages> {
   const img = await loadImageFromSrc(originalDataUrl);
-  const hd = renderEditedToCanvas(img, edits, 2200, 0.94);
-  const ia = renderEditedToCanvas(img, edits, 1024, 0.82);
+  // Maximum HD quality for storage & printing (up to 2800px at 97% JPEG quality)
+  const hd = renderEditedToCanvas(img, edits, 2800, 0.97);
+  // High-clarity 1400px image for OCR / AI Vision accuracy on thin thermal receipts
+  const ia = renderEditedToCanvas(img, edits, 1400, 0.9);
 
   return {
     originalDataUrl,

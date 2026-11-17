@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import {
   X,
   ExternalLink,
@@ -7,6 +7,8 @@ import {
   Printer,
   FileImage,
   Check,
+  Camera,
+  Upload,
 } from 'lucide-react';
 import {
   type ExpenseRecord,
@@ -23,6 +25,7 @@ import {
   deleteExpenseInBackend,
   updateExpenseInBackend,
 } from '../services/credibanApi';
+import { processInvoiceImageFile } from '../utils/imageProcessor';
 import { CredibanLogo } from './CredibanLogo';
 
 interface EvidenceModalProps {
@@ -44,6 +47,9 @@ export const EvidenceModal: React.FC<EvidenceModalProps> = ({
   const [editing, setEditing] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [photoStatusMsg, setPhotoStatusMsg] = useState('');
+  const signedCamRef = useRef<HTMLInputElement>(null);
+  const signedFileRef = useRef<HTMLInputElement>(null);
 
   const [razonSocial, setRazonSocial] = useState(record.razonSocial);
   const [nombreComercial, setNombreComercial] = useState(record.nombreComercial);
@@ -53,6 +59,37 @@ export const EvidenceModal: React.FC<EvidenceModalProps> = ({
   const [totalStr, setTotalStr] = useState(record.total.toFixed(2));
   const [naturaleza, setNaturaleza] = useState<NaturalezaGasto>(record.naturaleza);
   const [descripcion, setDescripcion] = useState(record.descripcion);
+
+  const handleUploadSignedPhoto = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setBusy(true);
+    setPhotoStatusMsg('');
+    try {
+      const processed = await processInvoiceImageFile(file);
+      setImgFailed(false);
+      const next: ExpenseRecord = {
+        ...record,
+        linkFotoHd: processed.hdDataUrl,
+        estado: record.estado.includes('FIRMADO') ? record.estado : `${record.estado} · FIRMADO`,
+      };
+      const res = await updateExpenseInBackend(
+        next,
+        user,
+        processed.hdBase64,
+        `${record.id}_${record.numeroComprobante || 'COMPROBANTE'}_FIRMADO.jpg`
+      );
+      onUpdated(res.savedRecord);
+      setPhotoStatusMsg(res.message);
+    } catch (err) {
+      setPhotoStatusMsg(
+        err instanceof Error ? err.message : 'No se pudo adjuntar la foto firmada.'
+      );
+    } finally {
+      setBusy(false);
+      e.target.value = '';
+    }
+  };
 
   const handleSaveEdit = async () => {
     const numTotal = parseFloat(totalStr) || 0;
@@ -74,8 +111,8 @@ export const EvidenceModal: React.FC<EvidenceModalProps> = ({
         naturaleza,
         descripcion: descripcion.trim(),
       };
-      await updateExpenseInBackend(next, user);
-      onUpdated(next);
+      const res = await updateExpenseInBackend(next, user);
+      onUpdated(res.savedRecord);
       setEditing(false);
     } finally {
       setBusy(false);
@@ -141,8 +178,24 @@ export const EvidenceModal: React.FC<EvidenceModalProps> = ({
 
         {/* Split Content */}
         <div className="flex-1 overflow-y-auto grid grid-cols-1 lg:grid-cols-12">
-          {/* Left: High Resolution Invoice Photo */}
-          <div className="lg:col-span-6 bg-slate-900/5 border-b lg:border-b-0 lg:border-r border-slate-200 p-5 flex flex-col items-center justify-center min-h-[260px]">
+          {/* Left: High Resolution Invoice / Signed Voucher Photo */}
+          <div className="lg:col-span-6 bg-slate-900/5 border-b lg:border-b-0 lg:border-r border-slate-200 p-5 flex flex-col items-center justify-center min-h-[260px] gap-3">
+            <input
+              ref={signedCamRef}
+              type="file"
+              accept="image/*"
+              capture="environment"
+              onChange={handleUploadSignedPhoto}
+              className="hidden"
+            />
+            <input
+              ref={signedFileRef}
+              type="file"
+              accept="image/*"
+              onChange={handleUploadSignedPhoto}
+              className="hidden"
+            />
+
             {photoUrl && !imgFailed ? (
               <div className="w-full flex flex-col items-center gap-3">
                 <img
@@ -150,7 +203,7 @@ export const EvidenceModal: React.FC<EvidenceModalProps> = ({
                   alt={`Comprobante ${record.numeroComprobante}`}
                   referrerPolicy="no-referrer"
                   onError={() => setImgFailed(true)}
-                  className="w-full max-h-[55vh] object-contain rounded-lg border border-slate-200 bg-white"
+                  className="w-full max-h-[50vh] object-contain rounded-lg border border-slate-200 bg-white"
                 />
                 {record.linkFotoView && (
                   <a
@@ -173,9 +226,36 @@ export const EvidenceModal: React.FC<EvidenceModalProps> = ({
                   Sin imagen adjunta disponible
                 </p>
                 <p className="text-xs text-slate-500 mt-1">
-                  Este registro corresponde a un asiento contable o su fotografía está archivada en el Servidor de la sede {record.sede}.
+                  Puedes subir o fotografiar el comprobante / voucher firmado para adjuntarlo en HD al Servidor.
                 </p>
               </div>
+            )}
+
+            <div className="flex flex-wrap items-center justify-center gap-2 no-print pt-1">
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => signedCamRef.current?.click()}
+                className="px-3 py-1.5 bg-[#1B4332] hover:bg-[#0f291e] disabled:opacity-60 text-white text-xs font-semibold rounded-lg inline-flex items-center gap-1.5 cursor-pointer"
+              >
+                <Camera className="w-3.5 h-3.5" />
+                <span>Fotografiar Firmado</span>
+              </button>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => signedFileRef.current?.click()}
+                className="px-3 py-1.5 bg-white border border-slate-300 hover:bg-slate-50 disabled:opacity-60 text-slate-800 text-xs font-semibold rounded-lg inline-flex items-center gap-1.5 cursor-pointer"
+              >
+                <Upload className="w-3.5 h-3.5" />
+                <span>{photoUrl ? 'Reemplazar Foto HD' : 'Subir Foto HD'}</span>
+              </button>
+            </div>
+
+            {photoStatusMsg && (
+              <p className="text-xs font-medium text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-1.5 text-center">
+                {photoStatusMsg}
+              </p>
             )}
           </div>
 

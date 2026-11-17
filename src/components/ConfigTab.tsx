@@ -12,6 +12,11 @@ import {
   Check,
   Lightbulb,
   Minus,
+  ShieldCheck,
+  UserCheck,
+  UserX,
+  Code2,
+  Copy,
 } from 'lucide-react';
 import {
   OFFICIAL_CATEGORIES,
@@ -23,13 +28,17 @@ import {
 } from '../types/crediban';
 import {
   createSedeInBackend,
+  getUserAccessOverrides,
   moveCriterionNatureInBackend,
   saveCriterionInBackend,
+  saveSedeCustomizationInBackend,
+  saveUserAccessOverrides,
 } from '../services/credibanApi';
 import { exportExpensesToCsv } from '../utils/searchAndPivot';
 
 interface ConfigTabProps {
   user: UserSession;
+  usersDirectory: UserSession[];
   criteria: ExpenseCriterion[];
   expenses: ExpenseRecord[];
   sedes: SedeRecord[];
@@ -44,10 +53,13 @@ interface ConfigTabProps {
   onCriterionSaved: (criterion: ExpenseCriterion) => void;
   onCriterionRemoved: (idCriterio: string) => void;
   onSedeCreated: (sede: SedeRecord) => void;
+  onSedeUpdated?: (sede: SedeRecord) => void;
+  onUsersAccessUpdated: (overrides: Record<string, boolean>) => void;
 }
 
 export const ConfigTab: React.FC<ConfigTabProps> = ({
   user,
+  usersDirectory,
   criteria,
   expenses,
   sedes,
@@ -55,6 +67,8 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({
   onCriterionSaved,
   onCriterionRemoved,
   onSedeCreated,
+  onSedeUpdated,
+  onUsersAccessUpdated,
 }) => {
   const [reclassifyHistorical, setReclassifyHistorical] = useState(true);
   const [feedback, setFeedback] = useState('');
@@ -74,11 +88,24 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({
   const [newVarCategoryName, setNewVarCategoryName] = useState('');
   const [newVarFirstSubtipo, setNewVarFirstSubtipo] = useState('');
 
-  // New Sede Form
+  // New Sede Form & Per-Sede Receipt Personalization Drafts
   const [sedeName, setSedeName] = useState('');
   const [sedeCode, setSedeCode] = useState('');
   const [sedeBudgetFixed, setSedeBudgetFixed] = useState('6000');
   const [sedeBudgetVar, setSedeBudgetVar] = useState('4500');
+  const [sedeAddress, setSedeAddress] = useState('');
+  const [sedeLocation, setSedeLocation] = useState('');
+  const [sedeDrafts, setSedeDrafts] = useState<Record<string, SedeRecord>>({});
+  const [savingSedeKey, setSavingSedeKey] = useState<string | null>(null);
+
+  // Manager User Access Control & Script Reference
+  const [accessOverrides, setAccessOverrides] = useState<Record<string, boolean>>(() =>
+    getUserAccessOverrides()
+  );
+  const [userSearch, setUserSearch] = useState('');
+  const [savingAccess, setSavingAccess] = useState(false);
+  const [showScriptCode, setShowScriptCode] = useState(false);
+  const [copiedScript, setCopiedScript] = useState(false);
 
   const activeCriteria = useMemo(
     () => criteria.filter((c) => c.estado !== 'INACTIVO'),
@@ -283,6 +310,12 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({
       presupuestoMensualFijo: parseFloat(sedeBudgetFixed) || 6000,
       presupuestoMensualVariable: parseFloat(sedeBudgetVar) || 4500,
       nombreHojaSede: `SEDE_${cleanName}`,
+      direccion: sedeAddress.trim().toUpperCase() || 'DIRECCIÓN POR CONFIGURAR',
+      ubicacion: sedeLocation.trim().toUpperCase() || `${cleanName} - PERÚ`,
+      telefono: '',
+      codigoSbs: 'INSCRITO EN LA SBS BAJO CODIGO REGISTRAL 00038222-2025',
+      mensajePie: '*** TE DESEO MUCHO EXITO ***',
+      correoContacto: 'CREDIBANPERU@GMAIL.COM',
     };
 
     onSedeCreated(newSede);
@@ -290,6 +323,53 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({
     setFeedback(res.message);
     setSedeName('');
     setSedeCode('');
+    setSedeAddress('');
+    setSedeLocation('');
+  };
+
+  const getSedeDraft = (s: SedeRecord): SedeRecord => sedeDrafts[s.nombreSede] || s;
+
+  const updateSedeDraftField = (
+    sedeObj: SedeRecord,
+    field: keyof SedeRecord,
+    value: string | number
+  ) => {
+    const current = getSedeDraft(sedeObj);
+    setSedeDrafts((prev) => ({
+      ...prev,
+      [sedeObj.nombreSede]: {
+        ...current,
+        [field]: value,
+      },
+    }));
+  };
+
+  const handleSaveSedeCustomization = async (sedeObj: SedeRecord) => {
+    const draft = getSedeDraft(sedeObj);
+    setSavingSedeKey(sedeObj.nombreSede);
+    try {
+      const normalized: SedeRecord = {
+        ...draft,
+        direccion: (draft.direccion || '').trim().toUpperCase() || 'DIRECCIÓN POR CONFIGURAR',
+        ubicacion:
+          (draft.ubicacion || '').trim().toUpperCase() || `${draft.nombreSede} - PERÚ`,
+        telefono: (draft.telefono || '').trim(),
+        codigoSbs:
+          (draft.codigoSbs || '').trim().toUpperCase() ||
+          'INSCRITO EN LA SBS BAJO CODIGO REGISTRAL 00038222-2025',
+        mensajePie:
+          (draft.mensajePie || '').trim().toUpperCase() || '*** TE DESEO MUCHO EXITO ***',
+        correoContacto:
+          (draft.correoContacto || '').trim().toUpperCase() || 'CREDIBANPERU@GMAIL.COM',
+        presupuestoMensualFijo: Number(draft.presupuestoMensualFijo) || 0,
+        presupuestoMensualVariable: Number(draft.presupuestoMensualVariable) || 0,
+      };
+      onSedeUpdated?.(normalized);
+      const res = await saveSedeCustomizationInBackend(normalized, user.usuario);
+      setFeedback(res.message);
+    } finally {
+      setSavingSedeKey(null);
+    }
   };
 
   const renderColumn = (
@@ -605,19 +685,182 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({
         {renderColumn('Costo Variable', groupedByNature.variables, false)}
       </div>
 
-      {/* Sedes Management Card */}
-      <div className="bg-white rounded-xl border border-slate-200 p-5 space-y-4">
-        <div className="flex items-center gap-2">
-          <Building className="w-4 h-4 text-[#59B447]" />
-          <h3 className="text-sm font-bold text-slate-900">
-            Gestión Dinámica de Sedes (Servidor y Nube)
-          </h3>
+      {/* Sedes Management & Receipt Personalization Card */}
+      <div className="bg-white rounded-xl border border-slate-200 p-5 space-y-5">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <Building className="w-4 h-4 text-[#59B447]" />
+            <div>
+              <h3 className="text-sm font-bold text-slate-900">
+                Personalización de Sedes y Cabecera de Recibos
+              </h3>
+              <p className="text-xs text-slate-500">
+                Edita la dirección, ubicación geográfica, teléfono, correo y presupuestos de cada sede activa para que sus recibos se impriman personalizados.
+              </p>
+            </div>
+          </div>
+          <span className="text-xs font-mono font-semibold text-slate-600">
+            {sedes.length} sede{sedes.length === 1 ? '' : 's'} activa{sedes.length === 1 ? '' : 's'}
+          </span>
         </div>
 
-        <form onSubmit={handleCreateSede} className="grid grid-cols-1 sm:grid-cols-5 gap-3 items-end">
+        {/* Editable Active Sede Cards */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          {sedes.map((s) => {
+            const draft = getSedeDraft(s);
+            const isSavingThis = savingSedeKey === s.nombreSede;
+            return (
+              <div
+                key={s.nombreSede}
+                className="p-4 rounded-xl border border-slate-200 bg-slate-50/70 space-y-3"
+              >
+                <div className="flex items-center justify-between gap-2 pb-2 border-b border-slate-200">
+                  <div>
+                    <h4 className="text-sm font-extrabold text-[#1B4332]">
+                      SEDE {s.nombreSede}
+                    </h4>
+                    <p className="text-[11px] text-slate-500 font-mono">
+                      Código: {draft.codigoSede} · Serie independiente desde 0001
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={isSavingThis}
+                    onClick={() => handleSaveSedeCustomization(s)}
+                    className="px-3 py-1.5 bg-[#1B4332] hover:bg-[#0f291e] disabled:opacity-60 text-white text-xs font-semibold rounded-lg flex items-center gap-1 cursor-pointer"
+                  >
+                    <Check className="w-3.5 h-3.5" />
+                    <span>{isSavingThis ? 'Guardando...' : 'Guardar Sede'}</span>
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-xs">
+                  <div>
+                    <label className="block text-[11px] font-medium text-slate-700 mb-1">
+                      Dirección en Recibo
+                    </label>
+                    <input
+                      type="text"
+                      aria-label={`Dirección sede ${s.nombreSede}`}
+                      value={draft.direccion || ''}
+                      onChange={(e) => updateSedeDraftField(s, 'direccion', e.target.value)}
+                      placeholder="Ej. AV. LUZURIAGA #450"
+                      className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-md uppercase"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-medium text-slate-700 mb-1">
+                      Ubicación (Ciudad - Prov - Dpto)
+                    </label>
+                    <input
+                      type="text"
+                      aria-label={`Ubicación sede ${s.nombreSede}`}
+                      value={draft.ubicacion || ''}
+                      onChange={(e) => updateSedeDraftField(s, 'ubicacion', e.target.value)}
+                      placeholder={`Ej. ${s.nombreSede} - PROV - DPTO`}
+                      className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-md uppercase"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-medium text-slate-700 mb-1">
+                      Correo de Contacto
+                    </label>
+                    <input
+                      type="text"
+                      aria-label={`Correo sede ${s.nombreSede}`}
+                      value={draft.correoContacto || ''}
+                      onChange={(e) =>
+                        updateSedeDraftField(s, 'correoContacto', e.target.value)
+                      }
+                      placeholder="CREDIBANPERU@GMAIL.COM"
+                      className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-md uppercase"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-medium text-slate-700 mb-1">
+                      Teléfono / WhatsApp (Opcional)
+                    </label>
+                    <input
+                      type="text"
+                      aria-label={`Teléfono sede ${s.nombreSede}`}
+                      value={draft.telefono || ''}
+                      onChange={(e) => updateSedeDraftField(s, 'telefono', e.target.value)}
+                      placeholder="Ej. 999 888 777"
+                      className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-md font-mono"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-medium text-slate-700 mb-1">
+                      Subtítulo / Registro SBS
+                    </label>
+                    <input
+                      type="text"
+                      aria-label={`SBS sede ${s.nombreSede}`}
+                      value={draft.codigoSbs || ''}
+                      onChange={(e) => updateSedeDraftField(s, 'codigoSbs', e.target.value)}
+                      className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-md uppercase"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-medium text-slate-700 mb-1">
+                      Mensaje de Pie del Recibo
+                    </label>
+                    <input
+                      type="text"
+                      aria-label={`Mensaje pie sede ${s.nombreSede}`}
+                      value={draft.mensajePie || ''}
+                      onChange={(e) => updateSedeDraftField(s, 'mensajePie', e.target.value)}
+                      className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-md uppercase"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-medium text-slate-700 mb-1">
+                      Presup. Mensual Fijo (S/)
+                    </label>
+                    <input
+                      type="number"
+                      value={draft.presupuestoMensualFijo}
+                      onChange={(e) =>
+                        updateSedeDraftField(
+                          s,
+                          'presupuestoMensualFijo',
+                          parseFloat(e.target.value) || 0
+                        )
+                      }
+                      className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-md font-mono"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-medium text-slate-700 mb-1">
+                      Presup. Mensual Variable (S/)
+                    </label>
+                    <input
+                      type="number"
+                      value={draft.presupuestoMensualVariable}
+                      onChange={(e) =>
+                        updateSedeDraftField(
+                          s,
+                          'presupuestoMensualVariable',
+                          parseFloat(e.target.value) || 0
+                        )
+                      }
+                      className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-md font-mono"
+                    />
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Create New Sede Form */}
+        <form
+          onSubmit={handleCreateSede}
+          className="pt-4 border-t border-slate-200 grid grid-cols-1 sm:grid-cols-6 gap-3 items-end"
+        >
           <div className="sm:col-span-2">
             <label htmlFor="sede-name" className="block text-xs font-medium text-slate-700 mb-1">
-              Nombre Nueva Sede
+              Crear Nueva Sede
             </label>
             <input
               id="sede-name"
@@ -644,34 +887,632 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({
             />
           </div>
           <div>
-            <label htmlFor="sede-pf" className="block text-xs font-medium text-slate-700 mb-1">
-              Presup. Fijo (S/)
+            <label htmlFor="sede-addr" className="block text-xs font-medium text-slate-700 mb-1">
+              Dirección
             </label>
             <input
-              id="sede-pf"
-              type="number"
-              value={sedeBudgetFixed}
-              onChange={(e) => setSedeBudgetFixed(e.target.value)}
-              className="w-full px-3 py-2 text-xs font-mono border border-slate-300 rounded-lg"
+              id="sede-addr"
+              type="text"
+              value={sedeAddress}
+              onChange={(e) => setSedeAddress(e.target.value)}
+              placeholder="AV. GRAU #200"
+              className="w-full px-3 py-2 text-xs uppercase border border-slate-300 rounded-lg"
+            />
+          </div>
+          <div>
+            <label htmlFor="sede-loc" className="block text-xs font-medium text-slate-700 mb-1">
+              Ubicación
+            </label>
+            <input
+              id="sede-loc"
+              type="text"
+              value={sedeLocation}
+              onChange={(e) => setSedeLocation(e.target.value)}
+              placeholder="BARRANCA - LIMA"
+              className="w-full px-3 py-2 text-xs uppercase border border-slate-300 rounded-lg"
             />
           </div>
           <button
             type="submit"
             className="px-4 py-2 bg-[#1B4332] hover:bg-[#0f291e] text-white text-xs font-semibold rounded-lg cursor-pointer"
           >
-            Crear Sede
+            + Crear Sede
           </button>
         </form>
+      </div>
 
-        <div className="pt-2 border-t border-slate-100 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-700">
-          <span className="text-slate-500 font-medium">Sedes activas ({sedes.length}):</span>
-          {sedes.map((s) => (
-            <span key={s.nombreSede} className="font-mono font-semibold">
-              {s.nombreSede}
-            </span>
-          ))}
+      {/* Manager Access Control for System Users */}
+      <div className="bg-white rounded-xl border border-slate-200 p-5 space-y-4 no-print">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <ShieldCheck className="w-4 h-4 text-[#1B4332]" />
+            <div>
+              <h3 className="text-sm font-bold text-slate-900">
+                Control de Acceso de Usuarios al Sistema
+              </h3>
+              <p className="text-xs text-slate-500">
+                Define qué colaboradores del directorio pueden iniciar sesión en esta plataforma.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <input
+              type="text"
+              value={userSearch}
+              onChange={(e) => setUserSearch(e.target.value)}
+              placeholder="Buscar nombre, usuario o sede..."
+              className="px-3 py-1.5 text-xs border border-slate-300 rounded-lg"
+            />
+            <button
+              type="button"
+              disabled={savingAccess}
+              onClick={async () => {
+                setSavingAccess(true);
+                const res = await saveUserAccessOverrides(accessOverrides, user.usuario);
+                onUsersAccessUpdated(accessOverrides);
+                setFeedback(res.message);
+                setSavingAccess(false);
+              }}
+              className="px-3.5 py-1.5 bg-[#1B4332] hover:bg-[#0f291e] disabled:opacity-60 text-white text-xs font-semibold rounded-lg whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              {savingAccess ? 'Guardando...' : 'Guardar Permisos'}
+            </button>
+          </div>
         </div>
+
+        <div className="overflow-x-auto border border-slate-200 rounded-lg">
+          <table className="w-full text-left border-collapse text-xs">
+            <thead>
+              <tr className="bg-slate-50 border-b border-slate-200 text-slate-600 uppercase">
+                <th className="py-2.5 px-3 font-semibold">Colaborador</th>
+                <th className="py-2.5 px-3 font-semibold">Usuario</th>
+                <th className="py-2.5 px-3 font-semibold">Cargo / Sede</th>
+                <th className="py-2.5 px-3 font-semibold">DNI</th>
+                <th className="py-2.5 px-3 font-semibold text-right">Acceso al Sistema</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {usersDirectory
+                .filter((u) => {
+                  const q = userSearch.trim().toLowerCase();
+                  if (!q) return true;
+                  return (
+                    (u.nombreCompleto || '').toLowerCase().includes(q) ||
+                    u.usuario.toLowerCase().includes(q) ||
+                    u.sede.toLowerCase().includes(q) ||
+                    u.cargo.toLowerCase().includes(q)
+                  );
+                })
+                .map((u) => {
+                  const key = u.usuario.toUpperCase();
+                  const isSelf = key === user.usuario.toUpperCase();
+                  const allowed =
+                    accessOverrides[key] !== undefined
+                      ? accessOverrides[key]
+                      : u.accesoSistema !== false;
+                  return (
+                    <tr key={u.usuario} className="hover:bg-slate-50">
+                      <td className="py-2 px-3 font-medium text-slate-900">
+                        {u.nombreCompleto || u.usuario.replace(/\./g, ' ')}
+                      </td>
+                      <td className="py-2 px-3 font-mono text-slate-600">{u.usuario}</td>
+                      <td className="py-2 px-3 text-slate-600">
+                        {u.cargo} · {u.sede}
+                      </td>
+                      <td className="py-2 px-3 font-mono text-slate-600">{u.dni || '—'}</td>
+                      <td className="py-2 px-3 text-right">
+                        <button
+                          type="button"
+                          disabled={isSelf}
+                          onClick={() =>
+                            setAccessOverrides((prev) => ({
+                              ...prev,
+                              [key]: !allowed,
+                            }))
+                          }
+                          className={`px-2.5 py-1 rounded-md text-xs font-semibold inline-flex items-center gap-1 cursor-pointer disabled:opacity-50 ${
+                            allowed
+                              ? 'bg-emerald-50 text-emerald-800 border border-emerald-200 hover:bg-emerald-100'
+                              : 'bg-red-50 text-red-700 border border-red-200 hover:bg-red-100'
+                          }`}
+                        >
+                          {allowed ? (
+                            <>
+                              <UserCheck className="w-3.5 h-3.5" />
+                              <span>Permitido</span>
+                            </>
+                          ) : (
+                            <>
+                              <UserX className="w-3.5 h-3.5" />
+                              <span>Bloqueado</span>
+                            </>
+                          )}
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Database Script Update Guide for Manager */}
+      <div className="bg-white rounded-xl border border-slate-200 p-5 space-y-3 no-print">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <Code2 className="w-4 h-4 text-slate-700" />
+            <div>
+              <h3 className="text-sm font-bold text-slate-900">
+                Código.gs Completo para tu Servidor de Base de Datos (Listo para Copiar)
+              </h3>
+              <p className="text-xs text-slate-500">
+                Por seguridad de Google, esta web no puede editar directamente tu cuenta en script.google.com. Copia este código completo, pégalo en tu proyecto <span className="font-mono">Código.gs</span> y haz clic en <strong>Implementar → Gestionar implementaciones → Nueva versión</strong>.
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => setShowScriptCode((v) => !v)}
+            className="px-3 py-1.5 text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-lg cursor-pointer"
+          >
+            {showScriptCode ? 'Ocultar Código' : 'Ver Código.gs Completo'}
+          </button>
+        </div>
+
+        {showScriptCode && (
+          <div className="space-y-2.5">
+            <div className="p-3 rounded-lg bg-emerald-50 border border-emerald-200 text-xs text-emerald-900 space-y-1">
+              <p className="font-bold">Mejoras incluidas automáticamente en este script:</p>
+              <ul className="list-disc pl-4 space-y-0.5 text-[11px]">
+                <li>Preserva tus 28 columnas exactas + 4 columnas de Yape/Plin (<span className="font-mono">TITULAR_CUENTA, NUMERO_OPERACION, ENTIDAD_PAGO, TELEFONO_CUENTA</span>).</li>
+                <li>Guarda <span className="font-mono">NUMERO DE COMPRANTE</span> y <span className="font-mono">RUC</span> en formato texto <span className="font-mono">@</span> para que nunca se recorten correlativos largos (ej. <span className="font-mono">F001-00034719</span>).</li>
+                <li>Permite reemplazar o adjuntar la foto HD del recibo firmado (<span className="font-mono">editarComprobante</span>) directo en Google Drive.</li>
+                <li>Persiste en la nube las direcciones de recibos por sede (<span className="font-mono">CONFIG_SEDES</span>), categorías fijas/variables (<span className="font-mono">PARAMETROS_GASTOS</span>) y permisos de acceso (<span className="font-mono">PERMISOS_ACCESO</span>).</li>
+              </ul>
+            </div>
+            <div className="flex justify-end">
+              <button
+                type="button"
+                onClick={() => {
+                  navigator.clipboard?.writeText(RECOMMENDED_GAS_SNIPPET);
+                  setCopiedScript(true);
+                  setTimeout(() => setCopiedScript(false), 2500);
+                }}
+                className="px-3 py-1.5 text-xs font-semibold bg-[#1B4332] text-white rounded-md flex items-center gap-1.5 cursor-pointer"
+              >
+                <Copy className="w-3.5 h-3.5" />
+                <span>{copiedScript ? '¡Código Completo Copiado!' : 'Copiar Código.gs Completo'}</span>
+              </button>
+            </div>
+            <pre className="p-3.5 bg-slate-900 text-slate-100 rounded-lg text-[11px] font-mono overflow-x-auto max-h-[420px] leading-relaxed">
+              {RECOMMENDED_GAS_SNIPPET}
+            </pre>
+          </div>
+        )}
       </div>
     </div>
   );
 };
+
+const RECOMMENDED_GAS_SNIPPET = `/**
+ * CREDIBAN PERU S.A.C. (RUC: 20613997360)
+ * Código.gs Completo — Compatible con hoja de 28+ columnas, Drive HD,
+ * personalización de sedes, criterios contables y permisos de usuarios.
+ */
+
+var ROOT_DRIVE_FOLDER_NAME = 'CREDIBAN_COMPROBANTES_HD';
+
+function jsonOut_(obj) {
+  return ContentService.createTextOutput(JSON.stringify(obj))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+function getMainExpensesSheet_(ss) {
+  var sheets = ss.getSheets();
+  for (var i = 0; i < sheets.length; i++) {
+    var name = sheets[i].getName().toUpperCase();
+    if (
+      name !== 'PARAMETROS_GASTOS' &&
+      name !== 'CONFIG_SEDES' &&
+      name !== 'PERMISOS_ACCESO'
+    ) {
+      return sheets[i];
+    }
+  }
+  return ss.getSheets()[0];
+}
+
+function ensureExtendedHeaders_(sheet) {
+  var expected = [
+    'Marca temporal',
+    'FILIAL',
+    'AÑO',
+    'PERIODO PARA EL CUAL DEBE REGISTRARSE',
+    'CATEGORIA',
+    'TIPO DE COMPROBANTE',
+    'FECHA DE EMISION DEL COMPROBANTE',
+    'NUMERO DE COMPRANTE',
+    'NOMBRE DE LA EMPRESA',
+    'RUC',
+    'MONTO TOTAL: CON ( , )',
+    'IGV (SOLO FACTURAS) CON ( , )',
+    'DESCRIPCION',
+    'FOTO O CAPTURA DEL COMPROBANTE',
+    'ID_REGISTRO',
+    'NOMBRE_COMERCIAL',
+    'SUBTOTAL',
+    'NATURALEZA',
+    'SUBTIPO',
+    'NIVEL_IMPACTO',
+    'USUARIO_REGISTRO',
+    'CARGO_USUARIO',
+    'DIRECCION_GPS',
+    'COORDENADAS_GPS',
+    'LINK_MAPA_RUTA',
+    'LINK_THUMBNAIL_HD',
+    'CARPETA_DESTINO',
+    'ESTADO_AUDITORIA',
+    'TITULAR_CUENTA',
+    'NUMERO_OPERACION',
+    'ENTIDAD_PAGO',
+    'TELEFONO_CUENTA'
+  ];
+  var lastCol = sheet.getLastColumn();
+  if (lastCol === 0) {
+    sheet.appendRow(expected);
+    return expected;
+  }
+  var headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+  for (var i = 0; i < expected.length; i++) {
+    if (headers.indexOf(expected[i]) === -1 && i >= headers.length) {
+      sheet.getRange(1, headers.length + 1).setValue(expected[i]);
+      headers.push(expected[i]);
+    }
+  }
+  return sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+}
+
+function sheetToObjects_(sheet) {
+  var lastRow = sheet.getLastRow();
+  var lastCol = sheet.getLastColumn();
+  if (lastRow < 2 || lastCol < 1) return [];
+  var values = sheet.getRange(1, 1, lastRow, lastCol).getDisplayValues();
+  var headers = values[0];
+  var out = [];
+  for (var r = 1; r < values.length; r++) {
+    var rowObj = {};
+    var empty = true;
+    for (var c = 0; c < headers.length; c++) {
+      var h = String(headers[c] || '').trim();
+      if (!h) continue;
+      var val = values[r][c];
+      if (val !== '') empty = false;
+      rowObj[h] = val;
+    }
+    if (!empty) out.push(rowObj);
+  }
+  return out;
+}
+
+function getOrCreateSubfolder_(parent, name) {
+  var clean = String(name || 'GENERAL').trim().toUpperCase();
+  var it = parent.getFoldersByName(clean);
+  return it.hasNext() ? it.next() : parent.createFolder(clean);
+}
+
+function saveBase64PhotoToDrive_(base64Str, fileName, sede, anio, mes) {
+  if (!base64Str) return null;
+  var rootIt = DriveApp.getFoldersByName(ROOT_DRIVE_FOLDER_NAME);
+  var root = rootIt.hasNext() ? rootIt.next() : DriveApp.createFolder(ROOT_DRIVE_FOLDER_NAME);
+  var sedeFolder = getOrCreateSubfolder_(root, sede || 'HUACHO');
+  var periodFolder = getOrCreateSubfolder_(sedeFolder, (anio || '2026') + '_' + (mes || 'GENERAL'));
+
+  var decoded = Utilities.base64Decode(base64Str);
+  var blob = Utilities.newBlob(decoded, 'image/jpeg', fileName || ('CB_' + Date.now() + '.jpg'));
+  var file = periodFolder.createFile(blob);
+  file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+  var fileId = file.getId();
+  return {
+    urlView: 'https://drive.google.com/file/d/' + fileId + '/view?usp=drivesdk',
+    urlThumbnail: 'https://drive.google.com/thumbnail?id=' + fileId + '&sz=w2000',
+    folderName: sedeFolder.getName() + '/' + periodFolder.getName()
+  };
+}
+
+function doGet(e) {
+  try {
+    var action = (e && e.parameter && e.parameter.action) || 'obtenerConfiguracionYDatos';
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+
+    if (action === 'obtenerConfiguracionYDatos') {
+      var mainSheet = getMainExpensesSheet_(ss);
+      ensureExtendedHeaders_(mainSheet);
+      var comprobantes = sheetToObjects_(mainSheet);
+
+      var paramSheet = ss.getSheetByName('PARAMETROS_GASTOS');
+      var criteriosGastos = paramSheet ? sheetToObjects_(paramSheet) : [];
+
+      var sedesSheet = ss.getSheetByName('CONFIG_SEDES');
+      var sedes = sedesSheet ? sheetToObjects_(sedesSheet) : [];
+
+      var permSheet = ss.getSheetByName('PERMISOS_ACCESO');
+      var permisos = permSheet ? sheetToObjects_(permSheet) : [];
+
+      return jsonOut_({
+        status: 'ok',
+        comprobantes: comprobantes,
+        criteriosGastos: criteriosGastos,
+        sedes: sedes,
+        permisos: permisos
+      });
+    }
+
+    return jsonOut_({ status: 'ok', message: 'Servicio CREDIBAN activo.' });
+  } catch (err) {
+    return jsonOut_({ status: 'error', message: String(err) });
+  }
+}
+
+function doPost(e) {
+  try {
+    var data = JSON.parse((e && e.postData && e.postData.contents) || '{}');
+    var action = String(data.action || '');
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+
+    if (action === 'registrarComprobante') {
+      var sheet = getMainExpensesSheet_(ss);
+      var headers = ensureExtendedHeaders_(sheet);
+      var driveRes = saveBase64PhotoToDrive_(
+        data.fotoBase64HD,
+        data.nombreArchivoFoto,
+        data.sede || data.filial,
+        data.anio,
+        data.mes || data.periodo
+      );
+      var idReg = data.idRegistro || ('GST-' + Utilities.formatString('%04d', sheet.getLastRow()));
+
+      var map = {
+        'Marca temporal': new Date(),
+        'FILIAL': String(data.sede || data.filial || 'HUACHO').toUpperCase(),
+        'AÑO': String(data.anio || ''),
+        'PERIODO PARA EL CUAL DEBE REGISTRARSE': String(data.mes || data.periodo || '').toUpperCase(),
+        'CATEGORIA': String(data.categoria || ''),
+        'TIPO DE COMPROBANTE': String(data.tipoComprobante || ''),
+        'FECHA DE EMISION DEL COMPROBANTE': String(data.fechaEmision || ''),
+        'NUMERO DE COMPRANTE': String(data.numeroComprobante || ''),
+        'NOMBRE DE LA EMPRESA': String(data.razonSocial || ''),
+        'RUC': String(data.ruc || ''),
+        'MONTO TOTAL: CON ( , )': String(data.montoConComa || data.total || '0,00'),
+        'IGV (SOLO FACTURAS) CON ( , )': String(data.igvConComa || data.igv || '0,00'),
+        'DESCRIPCION': String(data.descripcion || ''),
+        'FOTO O CAPTURA DEL COMPROBANTE': driveRes ? driveRes.urlView : '',
+        'ID_REGISTRO': idReg,
+        'NOMBRE_COMERCIAL': String(data.nombreComercial || ''),
+        'SUBTOTAL': String(data.subtotal || 0),
+        'NATURALEZA': String(data.naturaleza || 'Costo Variable'),
+        'SUBTIPO': String(data.subtipo || 'General'),
+        'NIVEL_IMPACTO': String(data.nivelImpacto || 'Regular'),
+        'USUARIO_REGISTRO': String(data.responsable || ''),
+        'CARGO_USUARIO': String(data.cargoUsuario || ''),
+        'DIRECCION_GPS': String(data.direccionGps || ''),
+        'COORDENADAS_GPS': String(data.coordenadasGps || ''),
+        'LINK_MAPA_RUTA': String(data.linkMapa || ''),
+        'LINK_THUMBNAIL_HD': driveRes ? driveRes.urlThumbnail : '',
+        'CARPETA_DESTINO': driveRes ? driveRes.folderName : '',
+        'ESTADO_AUDITORIA': 'APROBADO',
+        'TITULAR_CUENTA': String(data.titularCuenta || ''),
+        'NUMERO_OPERACION': String(data.numeroOperacion || ''),
+        'ENTIDAD_PAGO': String(data.entidadPago || ''),
+        'TELEFONO_CUENTA': String(data.telefonoCuenta || '')
+      };
+
+      var nextRow = sheet.getLastRow() + 1;
+      var rowArr = headers.map(function(h) { return map.hasOwnProperty(h) ? map[h] : ''; });
+      var range = sheet.getRange(nextRow, 1, 1, headers.length);
+      // Preserva texto exacto en correlativos largos (ej. F001-00034719) y RUC con ceros
+      var textCols = ['NUMERO DE COMPRANTE', 'RUC', 'NUMERO_OPERACION', 'TELEFONO_CUENTA', 'AÑO'];
+      textCols.forEach(function(colName) {
+        var idx = headers.indexOf(colName);
+        if (idx !== -1) sheet.getRange(nextRow, idx + 1).setNumberFormat('@');
+      });
+      range.setValues([rowArr]);
+
+      return jsonOut_({
+        status: 'ok',
+        idRegistro: idReg,
+        urlView: driveRes ? driveRes.urlView : '',
+        urlThumbnail: driveRes ? driveRes.urlThumbnail : ''
+      });
+    }
+
+    if (action === 'editarComprobante') {
+      var editSheet = getMainExpensesSheet_(ss);
+      var editHeaders = ensureExtendedHeaders_(editSheet);
+      var idCol = editHeaders.indexOf('ID_REGISTRO') + 1;
+      var lastR = editSheet.getLastRow();
+      var targetRow = -1;
+      if (idCol > 0 && lastR >= 2) {
+        var ids = editSheet.getRange(2, idCol, lastR - 1, 1).getDisplayValues();
+        for (var rIdx = 0; rIdx < ids.length; rIdx++) {
+          if (String(ids[rIdx][0]).trim() === String(data.idRegistro || '').trim()) {
+            targetRow = rIdx + 2;
+            break;
+          }
+        }
+      }
+      if (targetRow === -1) return jsonOut_({ status: 'error', message: 'Registro no encontrado.' });
+
+      var d = data.datosNuevos || {};
+      var driveUpdated = saveBase64PhotoToDrive_(
+        data.fotoBase64HD,
+        data.nombreArchivoFoto,
+        d.sede || data.sede,
+        d.anio,
+        d.mes
+      );
+
+      var updates = {
+        'FILIAL': d.sede,
+        'FECHA DE EMISION DEL COMPROBANTE': d.fecha,
+        'NUMERO DE COMPRANTE': d.numeroComprobante,
+        'NOMBRE DE LA EMPRESA': d.razonSocial,
+        'RUC': d.ruc,
+        'MONTO TOTAL: CON ( , )': d.montoConComa,
+        'IGV (SOLO FACTURAS) CON ( , )': d.igvConComa,
+        'SUBTOTAL': d.subtotal,
+        'DESCRIPCION': d.descripcion,
+        'NATURALEZA': d.naturaleza,
+        'SUBTIPO': d.subtipo,
+        'ESTADO_AUDITORIA': d.estado
+      };
+      if (driveUpdated) {
+        updates['FOTO O CAPTURA DEL COMPROBANTE'] = driveUpdated.urlView;
+        updates['LINK_THUMBNAIL_HD'] = driveUpdated.urlThumbnail;
+        updates['CARPETA_DESTINO'] = driveUpdated.folderName;
+      }
+      Object.keys(updates).forEach(function(col) {
+        if (updates[col] === undefined) return;
+        var cIdx = editHeaders.indexOf(col) + 1;
+        if (cIdx > 0) {
+          var cell = editSheet.getRange(targetRow, cIdx);
+          if (col === 'NUMERO DE COMPRANTE' || col === 'RUC') cell.setNumberFormat('@');
+          cell.setValue(String(updates[col]));
+        }
+      });
+
+      return jsonOut_({
+        status: 'ok',
+        urlView: driveUpdated ? driveUpdated.urlView : '',
+        urlThumbnail: driveUpdated ? driveUpdated.urlThumbnail : ''
+      });
+    }
+
+    if (action === 'eliminarComprobante') {
+      var delSheet = getMainExpensesSheet_(ss);
+      var delHeaders = ensureExtendedHeaders_(delSheet);
+      var delIdCol = delHeaders.indexOf('ID_REGISTRO') + 1;
+      var delLast = delSheet.getLastRow();
+      if (delIdCol > 0 && delLast >= 2) {
+        var delIds = delSheet.getRange(2, delIdCol, delLast - 1, 1).getDisplayValues();
+        for (var j = 0; j < delIds.length; j++) {
+          if (String(delIds[j][0]).trim() === String(data.idRegistro || '').trim()) {
+            delSheet.deleteRow(j + 2);
+            return jsonOut_({ status: 'ok' });
+          }
+        }
+      }
+      return jsonOut_({ status: 'error', message: 'ID no encontrado.' });
+    }
+
+    if (action === 'guardarConfigSede' || action === 'crearSede') {
+      var sedeSheet = ss.getSheetByName('CONFIG_SEDES') || ss.insertSheet('CONFIG_SEDES');
+      var sedeCols = [
+        'Codigo_Sede', 'Nombre_Sede', 'Estado',
+        'Presupuesto_Mensual_Fijo', 'Presupuesto_Mensual_Variable',
+        'Nombre_Hoja_Sede', 'Direccion', 'Ubicacion', 'Telefono',
+        'Codigo_SBS', 'Mensaje_Pie', 'Correo_Contacto'
+      ];
+      if (sedeSheet.getLastRow() === 0) sedeSheet.appendRow(sedeCols);
+      var nom = String(data.nombreSede || '').trim().toUpperCase();
+      var rowsSede = sheetToObjects_(sedeSheet);
+      var foundRow = -1;
+      for (var s = 0; s < rowsSede.length; s++) {
+        if (String(rowsSede[s].Nombre_Sede || '').toUpperCase() === nom) {
+          foundRow = s + 2;
+          break;
+        }
+      }
+      var rowSedeVals = [
+        String(data.codigoSede || nom.slice(0, 3)),
+        nom,
+        'ACTIVO',
+        Number(data.presupuestoMensualFijo || 5000),
+        Number(data.presupuestoMensualVariable || 10000),
+        'SEDE_' + nom,
+        String(data.direccion || ''),
+        String(data.ubicacion || ''),
+        String(data.telefono || ''),
+        String(data.codigoSbs || 'INSCRITO EN LA SBS BAJO CODIGO REGISTRAL 00038222-2025'),
+        String(data.mensajePie || '*** TE DESEO MUCHO EXITO ***'),
+        String(data.correoContacto || 'CREDIBANPERU@GMAIL.COM')
+      ];
+      if (foundRow > 0) {
+        sedeSheet.getRange(foundRow, 1, 1, sedeCols.length).setValues([rowSedeVals]);
+      } else {
+        sedeSheet.appendRow(rowSedeVals);
+      }
+      return jsonOut_({ status: 'ok' });
+    }
+
+    if (action === 'guardarCriterioGasto' || action === 'moverNaturalezaCriterio') {
+      var critSheet = ss.getSheetByName('PARAMETROS_GASTOS') || ss.insertSheet('PARAMETROS_GASTOS');
+      var critCols = [
+        'ID_Criterio', 'Naturaleza', 'Categoria_Forms', 'Categoria_Principal',
+        'Subtipo', 'Palabras_Clave_IA', 'Aplica_IGV_Defecto',
+        'Tope_Alerta_Soles', 'Estado', 'Ultima_Modificacion', 'Modificado_Por'
+      ];
+      if (critSheet.getLastRow() === 0) critSheet.appendRow(critCols);
+      var critRows = sheetToObjects_(critSheet);
+      var targetId = String(data.idCriterio || '');
+      var cRow = -1;
+      for (var ci = 0; ci < critRows.length; ci++) {
+        if (String(critRows[ci].ID_Criterio) === targetId) { cRow = ci + 2; break; }
+      }
+      if (action === 'moverNaturalezaCriterio' && cRow > 0) {
+        critSheet.getRange(cRow, 2).setValue(String(data.nuevaNaturaleza || 'Costo Variable'));
+        if (data.reclasificarHistoricos) {
+          var mSheet = getMainExpensesSheet_(ss);
+          var mHeaders = ensureExtendedHeaders_(mSheet);
+          var catIdx = mHeaders.indexOf('CATEGORIA');
+          var subIdx = mHeaders.indexOf('SUBTIPO');
+          var natIdx = mHeaders.indexOf('NATURALEZA');
+          if (subIdx !== -1 && natIdx !== -1 && mSheet.getLastRow() >= 2) {
+            var all = mSheet.getRange(2, 1, mSheet.getLastRow() - 1, mHeaders.length).getDisplayValues();
+            for (var mr = 0; mr < all.length; mr++) {
+              if (all[mr][subIdx] === data.subtipo && (!data.categoriaPrincipal || all[mr][catIdx] === data.categoriaPrincipal || true)) {
+                mSheet.getRange(mr + 2, natIdx + 1).setValue(String(data.nuevaNaturaleza));
+              }
+            }
+          }
+        }
+        return jsonOut_({ status: 'ok' });
+      }
+      var critVals = [
+        targetId || ('CRIT-' + Date.now()),
+        String(data.naturaleza || 'Costo Variable'),
+        String(data.categoriaForms || 'Otros gastos operativos'),
+        String(data.categoriaPrincipal || 'Otros gastos operativos'),
+        String(data.subtipo || 'General'),
+        String(data.palabrasClave || data.palabrasClaveIA || ''),
+        data.aplicaIgv || data.aplicaIgvDefecto ? 'SI' : 'NO',
+        Number(data.topeAlerta || data.topeAlertaSoles || 250),
+        String(data.estado || 'ACTIVO'),
+        new Date(),
+        String(data.modificadoPor || '')
+      ];
+      if (cRow > 0) {
+        critSheet.getRange(cRow, 1, 1, critCols.length).setValues([critVals]);
+      } else {
+        critSheet.appendRow(critVals);
+      }
+      return jsonOut_({ status: 'ok' });
+    }
+
+    if (action === 'guardarPermisosUsuarios') {
+      var hojaPerm = ss.getSheetByName('PERMISOS_ACCESO') || ss.insertSheet('PERMISOS_ACCESO');
+      hojaPerm.clearContents();
+      hojaPerm.appendRow(['USUARIO', 'ACCESO_PERMITIDO', 'MODIFICADO_POR', 'FECHA']);
+      var permisos = data.permisos || {};
+      Object.keys(permisos).forEach(function(usr) {
+        hojaPerm.appendRow([usr, permisos[usr] ? 'SI' : 'NO', data.modificadoPor || '', new Date()]);
+      });
+      return jsonOut_({ status: 'ok' });
+    }
+
+    return jsonOut_({ status: 'error', message: 'Acción no reconocida: ' + action });
+  } catch (err) {
+    return jsonOut_({ status: 'error', message: String(err) });
+  }
+}`;

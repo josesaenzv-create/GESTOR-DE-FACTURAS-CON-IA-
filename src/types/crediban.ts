@@ -50,9 +50,20 @@ export const MONTH_NAMES = [
 export type TipoComprobante =
   | 'FACTURA'
   | 'BOLETA'
-  | 'TICKET DE VENTA'
+  | 'YAPE / PLIN / TRANSFERENCIA'
   | 'RECIBO DE CAJA'
+  | 'RECIBO DE MOVILIDAD'
+  | 'TICKET DE VENTA'
   | 'SOLO CAPTURA';
+
+export type VoucherType =
+  | 'MOVILIDAD'
+  | 'CAJA'
+  | 'COMISION_COBRANZA'
+  | 'COMISION_COLOCACION'
+  | 'INCENTIVOS'
+  | 'VACACIONES'
+  | 'LIQUIDACION';
 
 export type NaturalezaGasto = 'Costo Fijo' | 'Costo Variable';
 
@@ -60,10 +71,13 @@ export type NivelImpacto = 'Regular' | 'Medio' | 'Fuerte';
 
 export interface UserSession {
   usuario: string;
+  nombreCompleto?: string;
+  dni?: string;
   cargo: string;
   sede: string;
   clave?: string;
   estado?: string;
+  accesoSistema?: boolean;
   jefeAsignado?: string;
   equipo?: string;
   isOfflineFallback?: boolean;
@@ -91,6 +105,10 @@ export interface ExpenseRecord {
   nivelImpacto: NivelImpacto;
   responsable: string;
   cargoUsuario: string;
+  titularCuenta?: string;
+  numeroOperacion?: string;
+  entidadPago?: string;
+  telefonoCuenta?: string;
   direccionGps: string;
   coordenadasGps: string;
   linkMapa: string;
@@ -124,6 +142,12 @@ export interface SedeRecord {
   nombreHojaSede?: string;
   idCarpetaDrive?: string;
   fechaCreacion?: string;
+  direccion?: string;
+  ubicacion?: string;
+  telefono?: string;
+  codigoSbs?: string;
+  mensajePie?: string;
+  correoContacto?: string;
 }
 
 export interface AiScanResult {
@@ -133,6 +157,10 @@ export interface AiScanResult {
   ruc: string;
   razonSocial: string;
   nombreComercial: string;
+  titularCuenta?: string;
+  numeroOperacion?: string;
+  entidadPago?: string;
+  telefonoCuenta?: string;
   subtotal: number;
   igv: number;
   total: number;

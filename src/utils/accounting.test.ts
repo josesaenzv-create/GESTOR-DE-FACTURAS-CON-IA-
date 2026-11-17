@@ -87,4 +87,12 @@ test('getMonthNameFromIsoDate and isManagerUser work accurately', () => {
     isManagerUser({ usuario: 'CAJA', cargo: 'CAJERO', sede: 'HUACHO' }),
     false
   );
+  assert.equal(
+    isManagerUser({ usuario: 'CAJA_HUACHO', cargo: 'ADMINISTRADOR DE SEDE', sede: 'HUACHO' }),
+    false
+  );
+  assert.equal(
+    isManagerUser({ usuario: 'ASESOR1', cargo: 'ASESOR', sede: 'HUARAZ' }),
+    false
+  );
 });

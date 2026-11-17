@@ -8,6 +8,7 @@ import {
   Search,
   BarChart3,
   Sliders,
+  Receipt,
 } from 'lucide-react';
 import {
   CREDIBAN_COMPANY,
@@ -17,18 +18,24 @@ import {
   type SedeRecord,
   type UserSession,
 } from './types/crediban';
-import { DEFAULT_CRITERIA, DEFAULT_SEDES, SEED_EXPENSES } from './data/seedData';
+import {
+  DEFAULT_CRITERIA,
+  DEFAULT_SEDES,
+  OFFLINE_FALLBACK_USERS,
+  SEED_EXPENSES,
+} from './data/seedData';
 import { fetchInitialAppBundle } from './services/credibanApi';
 import { isManagerUser } from './utils/accounting';
 import { CredibanLogo } from './components/CredibanLogo';
 import { LoginScreen } from './components/LoginScreen';
 import { ScannerTab } from './components/ScannerTab';
+import { VoucherEmitterTab } from './components/VoucherEmitterTab';
 import { SearchTab } from './components/SearchTab';
 import { DashboardTab } from './components/DashboardTab';
 import { ConfigTab } from './components/ConfigTab';
 import { EvidenceModal } from './components/EvidenceModal';
 
-type ActiveTab = 'scanner' | 'search' | 'dashboard' | 'config';
+type ActiveTab = 'scanner' | 'vouchers' | 'search' | 'dashboard' | 'config';
 type ViewMode = 'mobile' | 'pc';
 
 const SESSION_KEY = 'crediban_active_session_v1';
@@ -80,6 +87,7 @@ export default function App() {
   const [expenses, setExpenses] = useState<ExpenseRecord[]>(SEED_EXPENSES);
   const [criteria, setCriteria] = useState<ExpenseCriterion[]>(DEFAULT_CRITERIA);
   const [sedes, setSedes] = useState<SedeRecord[]>(DEFAULT_SEDES);
+  const [usersDirectory, setUsersDirectory] = useState<UserSession[]>(OFFLINE_FALLBACK_USERS);
   const [syncing, setSyncing] = useState(false);
   const [syncSource, setSyncSource] = useState<'live' | 'cache'>('cache');
   const [selectedExpense, setSelectedExpense] = useState<ExpenseRecord | null>(null);
@@ -103,6 +111,9 @@ export default function App() {
       setExpenses(bundle.expenses);
       setCriteria(bundle.criteria);
       setSedes(bundle.sedes);
+      if (bundle.users.length > 0) {
+        setUsersDirectory(bundle.users);
+      }
       setSyncSource(bundle.source);
     } finally {
       setSyncing(false);
@@ -114,6 +125,12 @@ export default function App() {
       loadBackendData(user);
     }
   }, [user, loadBackendData]);
+
+  useEffect(() => {
+    if (!isManager && (activeTab === 'dashboard' || activeTab === 'config')) {
+      setActiveTab('scanner');
+    }
+  }, [isManager, activeTab]);
 
   const handleLoginSuccess = (session: UserSession, remember: boolean) => {
     setUser(session);
@@ -154,7 +171,7 @@ export default function App() {
 
   const handleExpenseUpdated = (updated: ExpenseRecord) => {
     setExpenses((prev) => prev.map((r) => (r.id === updated.id ? updated : r)));
-    setSelectedExpense(updated);
+    setSelectedExpense((prev) => (prev && prev.id === updated.id ? updated : prev));
   };
 
   const handleExpenseDeleted = (id: string) => {
@@ -220,6 +237,14 @@ export default function App() {
     setSedes((prev) => [...prev.filter((s) => s.nombreSede !== sede.nombreSede), sede]);
   };
 
+  const handleSedeUpdated = (updated: SedeRecord) => {
+    setSedes((prev) =>
+      prev.map((s) =>
+        s.nombreSede.toUpperCase() === updated.nombreSede.toUpperCase() ? updated : s
+      )
+    );
+  };
+
   return (
     <div className="min-h-screen bg-[#f1f5f9] flex flex-col">
       {/* Corporate Header */}
@@ -250,6 +275,17 @@ export default function App() {
               </button>
               <button
                 type="button"
+                onClick={() => setActiveTab('vouchers')}
+                className={`px-3 py-1.5 text-sm font-medium rounded-lg whitespace-nowrap shrink-0 transition-colors cursor-pointer ${
+                  activeTab === 'vouchers'
+                    ? 'bg-[#59B447] text-white'
+                    : 'text-emerald-100 hover:text-white hover:bg-white/10'
+                }`}
+              >
+                2. Emitir Recibos
+              </button>
+              <button
+                type="button"
                 onClick={() => setActiveTab('search')}
                 className={`px-3 py-1.5 text-sm font-medium rounded-lg whitespace-nowrap shrink-0 transition-colors cursor-pointer ${
                   activeTab === 'search'
@@ -257,19 +293,21 @@ export default function App() {
                     : 'text-emerald-100 hover:text-white hover:bg-white/10'
                 }`}
               >
-                2. Buscador RUC
+                3. Buscador RUC
               </button>
-              <button
-                type="button"
-                onClick={() => setActiveTab('dashboard')}
-                className={`px-3 py-1.5 text-sm font-medium rounded-lg whitespace-nowrap shrink-0 transition-colors cursor-pointer ${
-                  activeTab === 'dashboard'
-                    ? 'bg-[#59B447] text-white'
-                    : 'text-emerald-100 hover:text-white hover:bg-white/10'
-                }`}
-              >
-                3. Dashboard
-              </button>
+              {isManager && (
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('dashboard')}
+                  className={`px-3 py-1.5 text-sm font-medium rounded-lg whitespace-nowrap shrink-0 transition-colors cursor-pointer ${
+                    activeTab === 'dashboard'
+                      ? 'bg-[#59B447] text-white'
+                      : 'text-emerald-100 hover:text-white hover:bg-white/10'
+                  }`}
+                >
+                  4. Dashboard
+                </button>
+              )}
               {isManager && (
                 <button
                   type="button"
@@ -280,7 +318,7 @@ export default function App() {
                       : 'text-emerald-100 hover:text-white hover:bg-white/10'
                   }`}
                 >
-                  4. Categorías y Sedes
+                  5. Configuración
                 </button>
               )}
             </nav>
@@ -384,25 +422,42 @@ export default function App() {
             onExpenseCreated={handleExpenseCreated}
           />
         )}
+        {activeTab === 'vouchers' && (
+          <VoucherEmitterTab
+            user={user}
+            usersDirectory={usersDirectory}
+            sedes={sedes}
+            existingExpenses={visibleExpenses}
+            isMobileMode={isMobileMode}
+            onExpenseCreated={handleExpenseCreated}
+            onExpenseUpdated={handleExpenseUpdated}
+          />
+        )}
         {activeTab === 'search' && (
           <SearchTab
             expenses={visibleExpenses}
+            sedes={sedes}
+            criteria={criteria}
+            user={user}
+            userName={user.nombreCompleto || user.usuario}
             isMobileMode={isMobileMode}
             onSelectExpense={setSelectedExpense}
             onImportCsvRecords={handleImportCsvRecords}
           />
         )}
-        {activeTab === 'dashboard' && (
+        {activeTab === 'dashboard' && isManager && (
           <DashboardTab
             user={user}
             expenses={visibleExpenses}
             sedes={sedes}
+            criteria={criteria}
             onSelectExpense={setSelectedExpense}
           />
         )}
         {activeTab === 'config' && isManager && (
           <ConfigTab
             user={user}
+            usersDirectory={usersDirectory}
             criteria={criteria}
             expenses={visibleExpenses}
             sedes={sedes}
@@ -410,6 +465,17 @@ export default function App() {
             onCriterionSaved={handleCriterionSaved}
             onCriterionRemoved={handleCriterionRemoved}
             onSedeCreated={handleSedeCreated}
+            onSedeUpdated={handleSedeUpdated}
+            onUsersAccessUpdated={(overrides) =>
+              setUsersDirectory((prev) =>
+                prev.map((u) => {
+                  const key = u.usuario.toUpperCase();
+                  return overrides[key] !== undefined
+                    ? { ...u, accesoSistema: overrides[key] }
+                    : u;
+                })
+              )
+            }
           />
         )}
       </main>
@@ -424,7 +490,7 @@ export default function App() {
         <div
           className={`${
             isMobileMode ? 'max-w-lg mx-auto' : ''
-          } grid ${isManager ? 'grid-cols-4' : 'grid-cols-3'} h-16`}
+          } grid ${isManager ? 'grid-cols-5' : 'grid-cols-3'} h-16`}
         >
           <button
             type="button"
@@ -438,6 +504,16 @@ export default function App() {
           </button>
           <button
             type="button"
+            onClick={() => setActiveTab('vouchers')}
+            className={`flex flex-col items-center justify-center gap-1 text-[11px] font-semibold cursor-pointer ${
+              activeTab === 'vouchers' ? 'text-[#1B4332] bg-emerald-50/70' : 'text-slate-500'
+            }`}
+          >
+            <Receipt className="w-4 h-4" />
+            <span>Recibos</span>
+          </button>
+          <button
+            type="button"
             onClick={() => setActiveTab('search')}
             className={`flex flex-col items-center justify-center gap-1 text-[11px] font-semibold cursor-pointer ${
               activeTab === 'search' ? 'text-[#1B4332] bg-emerald-50/70' : 'text-slate-500'
@@ -446,16 +522,18 @@ export default function App() {
             <Search className="w-4 h-4" />
             <span>Buscador</span>
           </button>
-          <button
-            type="button"
-            onClick={() => setActiveTab('dashboard')}
-            className={`flex flex-col items-center justify-center gap-1 text-[11px] font-semibold cursor-pointer ${
-              activeTab === 'dashboard' ? 'text-[#1B4332] bg-emerald-50/70' : 'text-slate-500'
-            }`}
-          >
-            <BarChart3 className="w-4 h-4" />
-            <span>Dashboard</span>
-          </button>
+          {isManager && (
+            <button
+              type="button"
+              onClick={() => setActiveTab('dashboard')}
+              className={`flex flex-col items-center justify-center gap-1 text-[11px] font-semibold cursor-pointer ${
+                activeTab === 'dashboard' ? 'text-[#1B4332] bg-emerald-50/70' : 'text-slate-500'
+              }`}
+            >
+              <BarChart3 className="w-4 h-4" />
+              <span>Dashboard</span>
+            </button>
+          )}
           {isManager && (
             <button
               type="button"
@@ -465,7 +543,7 @@ export default function App() {
               }`}
             >
               <Sliders className="w-4 h-4" />
-              <span>Categorías</span>
+              <span>Config</span>
             </button>
           )}
         </div>

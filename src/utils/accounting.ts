@@ -124,5 +124,5 @@ export function isManagerUser(user: UserSession | null): boolean {
   if (!user) return false;
   const cargo = String(user.cargo || '').toUpperCase();
   const sede = String(user.sede || '').toUpperCase();
-  return cargo.includes('GERENTE') || sede === 'TODAS';
+  return cargo.includes('GERENTE') || cargo.includes('GERENCIA') || sede === 'TODAS';
 }

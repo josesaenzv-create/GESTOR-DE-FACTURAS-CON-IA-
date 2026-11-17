@@ -57,9 +57,10 @@ async function startServer() {
 
   app.post('/api/scan-invoice', async (req: Request, res: Response) => {
     try {
-      const { imageBase64, mimeType, criteria } = req.body as {
+      const { imageBase64, mimeType, criteria, expectedTipo } = req.body as {
         imageBase64?: string;
         mimeType?: string;
+        expectedTipo?: string;
         criteria?: Array<{
           naturaleza: string;
           categoriaForms: string;
@@ -97,21 +98,23 @@ async function startServer() {
             .join('\n')
         : '';
 
-      const prompt = `Eres un auditor contable peruano experto en comprobantes SUNAT para CREDIBAN PERU S.A.C. (RUC 20613997360).
-Analiza la imagen del comprobante (Factura, Boleta, Ticket o Recibo) y extrae los datos reales visibles con máxima precisión.
+      const prompt = `Eres un auditor contable peruano experto en comprobantes SUNAT y capturas digitales (Yape, Plin, Transferencias BCP/BBVA/Interbank, Recibos de Caja y Movilidad) para CREDIBAN PERU S.A.C. (RUC 20613997360).
+Analiza la imagen y extrae los datos reales visibles con máxima precisión.
+${expectedTipo ? `El usuario indicó que este registro corresponde a: "${expectedTipo}".` : ''}
 
 Reglas estrictas:
-1. "ruc": Solo los 11 dígitos del RUC del EMISOR (o 8 dígitos si es DNI), sin puntos ni guiones. Nunca devuelvas el RUC de CREDIBAN (20613997360) como emisor.
-2. "tipoComprobante": Debe ser exactamente uno de: "FACTURA", "BOLETA", "TICKET DE VENTA", "RECIBO DE CAJA", "SOLO CAPTURA".
+1. "ruc": Solo los 11 dígitos del RUC del EMISOR (o 8 dígitos si es DNI), sin puntos ni guiones. Nunca devuelvas el RUC de CREDIBAN (20613997360) como emisor. Si es Yape/Plin sin RUC visible, déjalo vacío "".
+2. "tipoComprobante": Debe ser exactamente uno de: "FACTURA", "BOLETA", "YAPE / PLIN / TRANSFERENCIA", "RECIBO DE CAJA", "RECIBO DE MOVILIDAD", "TICKET DE VENTA", "SOLO CAPTURA".
 3. "fechaEmision": Formato exacto "YYYY-MM-DD". Si no se distingue el año, usa el actual.
-4. "numeroComprobante": Serie y correlativo exacto (ej. "F001-000456" o "B002-001234").
-5. "nombreComercial": Nombre corto comercial conocido o rubro (ej. "Grifo Primax", "Pluz Energía Luz", "Movistar").
-6. "subtotal", "igv", "total": Números con 2 decimales. Si es FACTURA peruana y el IGV (18%) no es explícito, calcula subtotal = total / 1.18 e igv = total - subtotal. Si es BOLETA o RECIBO, igv = 0 y subtotal = total.
-7. "categoria": Debe coincidir exactamente con una de las 19 categorías oficiales:
+4. "numeroComprobante": Serie y correlativo COMPLETO sin truncar ningún dígito (por ejemplo, si el comprobante dice "F001-00034719", devuelve "F001-00034719" completo con los 8 dígitos, jamás lo cortes a "F001-000347"; si dice "M001-0127" o "RC01-0025", devuélvelo completo). Si es Yape/Plin/Transferencia, usa el número de operación si no hay serie.
+5. "titularCuenta", "numeroOperacion", "entidadPago", "telefonoCuenta": Para capturas de Yape, Plin o transferencias bancarias, extrae el nombre completo del Titular/Destinatario, el Nro. de operación completo, la entidad ("YAPE", "PLIN", "BCP", "BBVA", etc.) y el celular o últimos dígitos de cuenta si aparece.
+6. "razonSocial" y "nombreComercial": Limpios sin barras "|" ni comas finales. Si es Yape/Plin, usa el titular como razón social.
+7. "subtotal", "igv", "total": Números con 2 decimales. Si es FACTURA peruana y el IGV (18%) no es explícito, calcula subtotal = total / 1.18 e igv = total - subtotal. Para BOLETA, YAPE / PLIN / TRANSFERENCIA, RECIBO DE CAJA o RECIBO DE MOVILIDAD, igv = 0 y subtotal = total.
+8. "categoria": Debe coincidir exactamente con una de las 19 categorías oficiales:
 ${OFFICIAL_CATEGORIES.map((c) => `  * ${c}`).join('\n')}
-8. "naturaleza": "Costo Fijo" o "Costo Variable" según el catálogo de criterios:
+9. "naturaleza": "Costo Fijo" o "Costo Variable" según el catálogo de criterios:
 ${criteriaSummary}
-9. "scoreConfiabilidad": Puntaje entre 0.0 y 1.0 indicando qué tan legible es la foto.`;
+10. "scoreConfiabilidad": Puntaje entre 0.0 y 1.0 indicando qué tan legible es la foto.`;
 
       const modelsToTry = ['gemini-4-hydrogen', 'gemini-3.1-flash-lite'] as const;
       let rawText = '';
@@ -143,6 +146,10 @@ ${criteriaSummary}
                   ruc: { type: Type.STRING },
                   razonSocial: { type: Type.STRING },
                   nombreComercial: { type: Type.STRING },
+                  titularCuenta: { type: Type.STRING },
+                  numeroOperacion: { type: Type.STRING },
+                  entidadPago: { type: Type.STRING },
+                  telefonoCuenta: { type: Type.STRING },
                   subtotal: { type: Type.NUMBER },
                   igv: { type: Type.NUMBER },
                   total: { type: Type.NUMBER },
@@ -190,21 +197,30 @@ ${criteriaSummary}
         ? 'Costo Fijo'
         : 'Costo Variable';
 
+      const cleanText = (val: unknown) =>
+        String(val || '')
+          .replace(/[|,;]+$/g, '')
+          .trim();
+
       res.json({
         result: {
-          tipoComprobante: parsed.tipoComprobante || 'FACTURA',
-          numeroComprobante: String(parsed.numeroComprobante || ''),
+          tipoComprobante: parsed.tipoComprobante || expectedTipo || 'FACTURA',
+          numeroComprobante: cleanText(parsed.numeroComprobante),
           fechaEmision: String(parsed.fechaEmision || new Date().toISOString().slice(0, 10)),
           ruc: String(parsed.ruc || '').replace(/\D/g, ''),
-          razonSocial: String(parsed.razonSocial || ''),
-          nombreComercial: String(parsed.nombreComercial || parsed.razonSocial || ''),
+          razonSocial: cleanText(parsed.razonSocial || parsed.titularCuenta),
+          nombreComercial: cleanText(parsed.nombreComercial || parsed.razonSocial || parsed.entidadPago),
+          titularCuenta: cleanText(parsed.titularCuenta),
+          numeroOperacion: cleanText(parsed.numeroOperacion),
+          entidadPago: cleanText(parsed.entidadPago),
+          telefonoCuenta: cleanText(parsed.telefonoCuenta),
           subtotal: Number(parsed.subtotal || 0),
           igv: Number(parsed.igv || 0),
           total: Number(parsed.total || 0),
           naturaleza: validNaturaleza,
           categoria: validCategory,
-          subtipo: String(parsed.subtipo || 'General'),
-          descripcion: String(parsed.descripcion || ''),
+          subtipo: cleanText(parsed.subtipo || 'General'),
+          descripcion: cleanText(parsed.descripcion),
           scoreConfiabilidad: Number(parsed.scoreConfiabilidad || 0.85),
         },
       });
