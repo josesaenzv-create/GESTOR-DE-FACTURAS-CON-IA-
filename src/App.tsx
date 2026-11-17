@@ -9,11 +9,13 @@ import {
   BarChart3,
   Sliders,
   Receipt,
+  Wallet,
 } from 'lucide-react';
 import {
   CREDIBAN_COMPANY,
   type ExpenseCriterion,
   type ExpenseRecord,
+  type MonthlySedeBudget,
   type NaturalezaGasto,
   type SedeRecord,
   type UserSession,
@@ -24,18 +26,22 @@ import {
   OFFLINE_FALLBACK_USERS,
   SEED_EXPENSES,
 } from './data/seedData';
-import { fetchInitialAppBundle } from './services/credibanApi';
-import { isManagerUser } from './utils/accounting';
+import {
+  fetchInitialAppBundle,
+  loadMonthlyBudgets,
+} from './services/credibanApi';
+import { isManagerUser, resolveUserSystemAccess } from './utils/accounting';
 import { CredibanLogo } from './components/CredibanLogo';
 import { LoginScreen } from './components/LoginScreen';
 import { ScannerTab } from './components/ScannerTab';
 import { VoucherEmitterTab } from './components/VoucherEmitterTab';
 import { SearchTab } from './components/SearchTab';
+import { BudgetTab } from './components/BudgetTab';
 import { DashboardTab } from './components/DashboardTab';
 import { ConfigTab } from './components/ConfigTab';
 import { EvidenceModal } from './components/EvidenceModal';
 
-type ActiveTab = 'scanner' | 'vouchers' | 'search' | 'dashboard' | 'config';
+type ActiveTab = 'scanner' | 'vouchers' | 'search' | 'budget' | 'dashboard' | 'config';
 type ViewMode = 'mobile' | 'pc';
 
 const SESSION_KEY = 'crediban_active_session_v1';
@@ -71,7 +77,11 @@ export default function App() {
   const [user, setUser] = useState<UserSession | null>(() => {
     if (typeof window !== 'undefined') {
       const params = new URLSearchParams(window.location.search);
-      if (params.get('autostart') === '1') {
+      const isLocalHost =
+        window.location.hostname === 'localhost' ||
+        window.location.hostname === '127.0.0.1';
+      // Security: Never allow URL ?autostart=1 privilege escalation on public deployments
+      if (isLocalHost && params.get('autostart') === '1') {
         return {
           usuario: 'GERENCIA',
           cargo: 'GERENTE GENERAL',
@@ -87,6 +97,7 @@ export default function App() {
   const [expenses, setExpenses] = useState<ExpenseRecord[]>(SEED_EXPENSES);
   const [criteria, setCriteria] = useState<ExpenseCriterion[]>(DEFAULT_CRITERIA);
   const [sedes, setSedes] = useState<SedeRecord[]>(DEFAULT_SEDES);
+  const [budgets, setBudgets] = useState<MonthlySedeBudget[]>(() => loadMonthlyBudgets());
   const [usersDirectory, setUsersDirectory] = useState<UserSession[]>(OFFLINE_FALLBACK_USERS);
   const [syncing, setSyncing] = useState(false);
   const [syncSource, setSyncSource] = useState<'live' | 'cache'>('cache');
@@ -104,21 +115,46 @@ export default function App() {
     }
   };
 
-  const loadBackendData = useCallback(async (session: UserSession) => {
-    setSyncing(true);
+  const handleLogout = useCallback(() => {
+    setUser(null);
+    setSelectedExpense(null);
     try {
-      const bundle = await fetchInitialAppBundle(session.sede, session.cargo);
-      setExpenses(bundle.expenses);
-      setCriteria(bundle.criteria);
-      setSedes(bundle.sedes);
-      if (bundle.users.length > 0) {
-        setUsersDirectory(bundle.users);
-      }
-      setSyncSource(bundle.source);
-    } finally {
-      setSyncing(false);
+      localStorage.removeItem(SESSION_KEY);
+      sessionStorage.removeItem(SESSION_KEY);
+    } catch {
+      // ignore
     }
   }, []);
+
+  const loadBackendData = useCallback(
+    async (session: UserSession) => {
+      setSyncing(true);
+      try {
+        const bundle = await fetchInitialAppBundle(session.sede, session.cargo);
+        // Security: Revoke remembered/active session if user was disabled by master script or Gerencia
+        if (bundle.users.length > 0) {
+          setUsersDirectory(bundle.users);
+          const matchedUser = bundle.users.find(
+            (u) => u.usuario.toUpperCase() === session.usuario.toUpperCase()
+          );
+          if (matchedUser && matchedUser.accesoSistema === false) {
+            handleLogout();
+            return;
+          }
+        }
+        setExpenses(bundle.expenses);
+        setCriteria(bundle.criteria);
+        setSedes(bundle.sedes);
+        if (bundle.budgets && bundle.budgets.length > 0) {
+          setBudgets(bundle.budgets);
+        }
+        setSyncSource(bundle.source);
+      } finally {
+        setSyncing(false);
+      }
+    },
+    [handleLogout]
+  );
 
   useEffect(() => {
     if (user) {
@@ -133,25 +169,15 @@ export default function App() {
   }, [isManager, activeTab]);
 
   const handleLoginSuccess = (session: UserSession, remember: boolean) => {
-    setUser(session);
+    const { clave: _omitClave, ...safeSession } = session;
+    setUser(safeSession);
     setActiveTab('scanner');
     try {
       if (remember) {
-        localStorage.setItem(SESSION_KEY, JSON.stringify(session));
+        localStorage.setItem(SESSION_KEY, JSON.stringify(safeSession));
       } else {
-        sessionStorage.setItem(SESSION_KEY, JSON.stringify(session));
+        sessionStorage.setItem(SESSION_KEY, JSON.stringify(safeSession));
       }
-    } catch {
-      // ignore
-    }
-  };
-
-  const handleLogout = () => {
-    setUser(null);
-    setSelectedExpense(null);
-    try {
-      localStorage.removeItem(SESSION_KEY);
-      sessionStorage.removeItem(SESSION_KEY);
     } catch {
       // ignore
     }
@@ -295,6 +321,17 @@ export default function App() {
               >
                 3. Buscador RUC
               </button>
+              <button
+                type="button"
+                onClick={() => setActiveTab('budget')}
+                className={`px-3 py-1.5 text-sm font-medium rounded-lg whitespace-nowrap shrink-0 transition-colors cursor-pointer ${
+                  activeTab === 'budget'
+                    ? 'bg-[#59B447] text-white'
+                    : 'text-emerald-100 hover:text-white hover:bg-white/10'
+                }`}
+              >
+                4. Presupuesto
+              </button>
               {isManager && (
                 <button
                   type="button"
@@ -305,7 +342,7 @@ export default function App() {
                       : 'text-emerald-100 hover:text-white hover:bg-white/10'
                   }`}
                 >
-                  4. Dashboard
+                  5. Dashboard
                 </button>
               )}
               {isManager && (
@@ -318,7 +355,7 @@ export default function App() {
                       : 'text-emerald-100 hover:text-white hover:bg-white/10'
                   }`}
                 >
-                  5. Configuración
+                  6. Configuración
                 </button>
               )}
             </nav>
@@ -442,7 +479,22 @@ export default function App() {
             userName={user.nombreCompleto || user.usuario}
             isMobileMode={isMobileMode}
             onSelectExpense={setSelectedExpense}
+            onDeleteExpense={handleExpenseDeleted}
             onImportCsvRecords={handleImportCsvRecords}
+          />
+        )}
+        {activeTab === 'budget' && (
+          <BudgetTab
+            user={user}
+            usersDirectory={usersDirectory}
+            sedes={sedes}
+            expenses={visibleExpenses}
+            criteria={criteria}
+            budgets={budgets}
+            isMobileMode={isMobileMode}
+            onBudgetSaved={(saved) =>
+              setBudgets((prev) => [saved, ...prev.filter((b) => b.id !== saved.id)])
+            }
           />
         )}
         {activeTab === 'dashboard' && isManager && (
@@ -452,6 +504,7 @@ export default function App() {
             sedes={sedes}
             criteria={criteria}
             onSelectExpense={setSelectedExpense}
+            onDeleteExpense={handleExpenseDeleted}
           />
         )}
         {activeTab === 'config' && isManager && (
@@ -470,9 +523,14 @@ export default function App() {
               setUsersDirectory((prev) =>
                 prev.map((u) => {
                   const key = u.usuario.toUpperCase();
-                  return overrides[key] !== undefined
-                    ? { ...u, accesoSistema: overrides[key] }
-                    : u;
+                  return {
+                    ...u,
+                    accesoSistema: resolveUserSystemAccess({
+                      estado: u.estado,
+                      cargo: u.cargo,
+                      override: overrides[key],
+                    }),
+                  };
                 })
               )
             }
@@ -490,12 +548,12 @@ export default function App() {
         <div
           className={`${
             isMobileMode ? 'max-w-lg mx-auto' : ''
-          } grid ${isManager ? 'grid-cols-5' : 'grid-cols-3'} h-16`}
+          } grid ${isManager ? 'grid-cols-6' : 'grid-cols-4'} h-16`}
         >
           <button
             type="button"
             onClick={() => setActiveTab('scanner')}
-            className={`flex flex-col items-center justify-center gap-1 text-[11px] font-semibold cursor-pointer ${
+            className={`flex flex-col items-center justify-center gap-1 text-[10px] sm:text-[11px] font-semibold cursor-pointer ${
               activeTab === 'scanner' ? 'text-[#1B4332] bg-emerald-50/70' : 'text-slate-500'
             }`}
           >
@@ -505,7 +563,7 @@ export default function App() {
           <button
             type="button"
             onClick={() => setActiveTab('vouchers')}
-            className={`flex flex-col items-center justify-center gap-1 text-[11px] font-semibold cursor-pointer ${
+            className={`flex flex-col items-center justify-center gap-1 text-[10px] sm:text-[11px] font-semibold cursor-pointer ${
               activeTab === 'vouchers' ? 'text-[#1B4332] bg-emerald-50/70' : 'text-slate-500'
             }`}
           >
@@ -515,30 +573,40 @@ export default function App() {
           <button
             type="button"
             onClick={() => setActiveTab('search')}
-            className={`flex flex-col items-center justify-center gap-1 text-[11px] font-semibold cursor-pointer ${
+            className={`flex flex-col items-center justify-center gap-1 text-[10px] sm:text-[11px] font-semibold cursor-pointer ${
               activeTab === 'search' ? 'text-[#1B4332] bg-emerald-50/70' : 'text-slate-500'
             }`}
           >
             <Search className="w-4 h-4" />
             <span>Buscador</span>
           </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab('budget')}
+            className={`flex flex-col items-center justify-center gap-1 text-[10px] sm:text-[11px] font-semibold cursor-pointer ${
+              activeTab === 'budget' ? 'text-[#1B4332] bg-emerald-50/70' : 'text-slate-500'
+            }`}
+          >
+            <Wallet className="w-4 h-4" />
+            <span>Presup.</span>
+          </button>
           {isManager && (
             <button
               type="button"
               onClick={() => setActiveTab('dashboard')}
-              className={`flex flex-col items-center justify-center gap-1 text-[11px] font-semibold cursor-pointer ${
+              className={`flex flex-col items-center justify-center gap-1 text-[10px] sm:text-[11px] font-semibold cursor-pointer ${
                 activeTab === 'dashboard' ? 'text-[#1B4332] bg-emerald-50/70' : 'text-slate-500'
               }`}
             >
               <BarChart3 className="w-4 h-4" />
-              <span>Dashboard</span>
+              <span>Panel</span>
             </button>
           )}
           {isManager && (
             <button
               type="button"
               onClick={() => setActiveTab('config')}
-              className={`flex flex-col items-center justify-center gap-1 text-[11px] font-semibold cursor-pointer ${
+              className={`flex flex-col items-center justify-center gap-1 text-[10px] sm:text-[11px] font-semibold cursor-pointer ${
                 activeTab === 'config' ? 'text-[#1B4332] bg-emerald-50/70' : 'text-slate-500'
               }`}
             >

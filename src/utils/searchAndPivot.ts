@@ -304,7 +304,11 @@ export function correctPeruUbigeo(data: NominatimAddressInput): {
 }
 
 function escapeCsvCell(val: unknown): string {
-  const str = String(val ?? '');
+  let str = String(val ?? '');
+  // Neutralize Excel/Sheets formula injection on text cells (keep negative numbers like -12.50 intact)
+  if (/^[=+\t\r@]/.test(str) || (/^-/.test(str) && !/^-\d+(\.\d+)?$/.test(str))) {
+    str = `'${str}`;
+  }
   if (/[",\n\r]/.test(str)) {
     return `"${str.replace(/"/g, '""')}"`;
   }

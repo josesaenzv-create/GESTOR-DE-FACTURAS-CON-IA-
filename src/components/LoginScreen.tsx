@@ -69,7 +69,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLoginSuccess }) => {
           <div className="mb-6">
             <h2 className="text-xl font-bold text-slate-900">Iniciar Sesión Corporativa</h2>
             <p className="text-sm text-slate-500 mt-1">
-              Escribe tu usuario y clave asignados para acceder al sistema.
+              Acceso directo habilitado por defecto para Cajeros, Administradores y Gerencia.
             </p>
           </div>
 

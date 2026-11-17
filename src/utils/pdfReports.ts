@@ -95,14 +95,27 @@ export function downloadVoucherPdf(
  * Prints via a dedicated hidden iframe (no window.open / popup blocked),
  * falling back to downloading the thermal PDF if sandbox restricts print().
  */
+function escapeHtml(raw: string): string {
+  return String(raw || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 export function printThermalVoucher(
   voucherImageDataUrl: string,
   title: string,
   filenameBase: string,
   aspectRatio = 1.4
 ): { mode: 'iframe-print' | 'pdf-fallback'; message: string } {
-  if (!voucherImageDataUrl || typeof document === 'undefined') {
-    return { mode: 'pdf-fallback', message: 'No hay vista previa para imprimir.' };
+  if (
+    !voucherImageDataUrl ||
+    !voucherImageDataUrl.startsWith('data:image/') ||
+    typeof document === 'undefined'
+  ) {
+    return { mode: 'pdf-fallback', message: 'No hay vista previa válida para imprimir.' };
   }
 
   try {
@@ -121,11 +134,13 @@ export function printThermalVoucher(
     iframe.style.pointerEvents = 'none';
     iframe.style.border = '0';
 
+    const safeTitle = escapeHtml(title);
+    const safeSrc = escapeHtml(voucherImageDataUrl);
     const html = `<!doctype html>
 <html lang="es">
   <head>
     <meta charset="utf-8" />
-    <title>${title.replace(/</g, '&lt;')}</title>
+    <title>${safeTitle}</title>
     <style>
       @page { size: 80mm auto; margin: 3mm; }
       * { box-sizing: border-box; }
@@ -134,7 +149,7 @@ export function printThermalVoucher(
     </style>
   </head>
   <body>
-    <img src="${voucherImageDataUrl}" alt="${title.replace(/"/g, '&quot;')}" />
+    <img src="${safeSrc}" alt="${safeTitle}" />
   </body>
 </html>`;
 

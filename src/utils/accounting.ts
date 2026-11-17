@@ -2,6 +2,7 @@ import { MONTH_NAMES } from '../types/crediban';
 import type {
   ExpenseRecord,
   NivelImpacto,
+  SedeRecord,
   TipoComprobante,
   UserSession,
 } from '../types/crediban';
@@ -125,4 +126,144 @@ export function isManagerUser(user: UserSession | null): boolean {
   const cargo = String(user.cargo || '').toUpperCase();
   const sede = String(user.sede || '').toUpperCase();
   return cargo.includes('GERENTE') || cargo.includes('GERENCIA') || sede === 'TODAS';
+}
+
+/**
+ * Política de acceso por defecto:
+ * Solo Cajeros, Administradores y Gerencia tienen acceso directo al sistema.
+ * Los Asesores y demás cargos están bloqueados por defecto salvo habilitación explícita de Gerencia.
+ */
+export function isDefaultAuthorizedRole(cargo: string | null | undefined): boolean {
+  const c = String(cargo || '').trim().toUpperCase();
+  if (!c) return false;
+  return (
+    c.includes('GERENTE') ||
+    c.includes('GERENCIA') ||
+    c.includes('DIRECTOR') ||
+    c.includes('CAJERO') ||
+    c.includes('CAJERA') ||
+    c.includes('CAJA') ||
+    c.includes('ADMINISTRADOR') ||
+    c.includes('ADMINISTRADORA')
+  );
+}
+
+export function resolveUserSystemAccess(params: {
+  estado?: string | null;
+  cargo?: string | null;
+  override?: boolean;
+}): boolean {
+  const est = String(params.estado || 'HABILITADO').trim().toUpperCase();
+  const masterDisabled =
+    est === 'DESHABILITADO' ||
+    est === 'INACTIVO' ||
+    est === 'BLOQUEADO' ||
+    est === 'SUSPENDIDO';
+  if (masterDisabled) return false;
+  if (params.override !== undefined) return Boolean(params.override);
+  return isDefaultAuthorizedRole(params.cargo);
+}
+
+function pickNonEmpty(
+  ...candidates: Array<string | undefined | null>
+): string {
+  for (const c of candidates) {
+    const trimmed = String(c ?? '').trim();
+    if (trimmed) return trimmed;
+  }
+  return '';
+}
+
+function pickNonEmptyAddress(
+  ...candidates: Array<string | undefined | null>
+): string {
+  for (const c of candidates) {
+    const trimmed = String(c ?? '').trim();
+    if (trimmed && trimmed.toUpperCase() !== 'DIRECCIÓN POR CONFIGURAR') {
+      return trimmed;
+    }
+  }
+  return 'DIRECCIÓN POR CONFIGURAR';
+}
+
+/**
+ * Precedencia de metadatos de sede:
+ * 1. Personalización explícita guardada en esta app (custom)
+ * 2. Configuración no vacía de CONFIG_SEDES en servidor de gastos (sede)
+ * 3. Datos oficiales vivos desde la App de Usuarios (masterSede: dirección, celular, correo, código)
+ * 4. Valores semilla por defecto (seedMatch)
+ */
+export function mergeSedeMetadata(params: {
+  sede: SedeRecord;
+  masterSede?: Partial<SedeRecord>;
+  custom?: Partial<SedeRecord>;
+  seedMatch?: SedeRecord;
+}): SedeRecord {
+  const { sede, masterSede, custom, seedMatch } = params;
+  const key = (sede.nombreSede || masterSede?.nombreSede || 'HUACHO').trim().toUpperCase();
+
+  return {
+    ...seedMatch,
+    ...masterSede,
+    ...sede,
+    ...custom,
+    nombreSede: key,
+    codigoSede:
+      pickNonEmpty(
+        custom?.codigoSede,
+        sede.codigoSede,
+        masterSede?.codigoSede,
+        seedMatch?.codigoSede
+      ) || key.slice(0, 3),
+    direccion: pickNonEmptyAddress(
+      custom?.direccion,
+      sede.direccion,
+      masterSede?.direccion,
+      seedMatch?.direccion
+    ),
+    ubicacion:
+      pickNonEmpty(
+        custom?.ubicacion,
+        sede.ubicacion,
+        masterSede?.ubicacion,
+        seedMatch?.ubicacion
+      ) || `${key} - PERÚ`,
+    telefono: pickNonEmpty(
+      custom?.telefono,
+      sede.telefono,
+      masterSede?.telefono,
+      seedMatch?.telefono
+    ),
+    codigoSbs:
+      pickNonEmpty(
+        custom?.codigoSbs,
+        sede.codigoSbs,
+        masterSede?.codigoSbs,
+        seedMatch?.codigoSbs
+      ) || 'INSCRITO EN LA SBS BAJO CODIGO REGISTRAL 00038222-2025',
+    mensajePie:
+      pickNonEmpty(
+        custom?.mensajePie,
+        sede.mensajePie,
+        masterSede?.mensajePie,
+        seedMatch?.mensajePie
+      ) || '*** TE DESEO MUCHO EXITO ***',
+    correoContacto:
+      pickNonEmpty(
+        custom?.correoContacto,
+        sede.correoContacto,
+        masterSede?.correoContacto,
+        seedMatch?.correoContacto
+      ) || 'CREDIBANPERU@GMAIL.COM',
+    presupuestoMensualFijo:
+      custom?.presupuestoMensualFijo ??
+      sede.presupuestoMensualFijo ??
+      seedMatch?.presupuestoMensualFijo ??
+      5000,
+    presupuestoMensualVariable:
+      custom?.presupuestoMensualVariable ??
+      sede.presupuestoMensualVariable ??
+      seedMatch?.presupuestoMensualVariable ??
+      10000,
+  };
 }

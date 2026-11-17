@@ -34,6 +34,7 @@ import {
   saveSedeCustomizationInBackend,
   saveUserAccessOverrides,
 } from '../services/credibanApi';
+import { isDefaultAuthorizedRole, resolveUserSystemAccess } from '../utils/accounting';
 import { exportExpensesToCsv } from '../utils/searchAndPivot';
 
 interface ConfigTabProps {
@@ -256,6 +257,33 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({
     const archived: ExpenseCriterion = { ...item, estado: 'INACTIVO', modificadoPor: user.usuario };
     await saveCriterionInBackend(archived, user.usuario);
     setFeedback(`Subtipo "${item.subtipo}" eliminado de ${item.categoriaPrincipal}.`);
+  };
+
+  const handleMoveSingleSubtype = async (item: ExpenseCriterion) => {
+    const nextNat: NaturalezaGasto =
+      item.naturaleza === 'Costo Fijo' ? 'Costo Variable' : 'Costo Fijo';
+    onCriterionMoved(
+      item.idCriterio,
+      nextNat,
+      reclassifyHistorical,
+      item.categoriaPrincipal,
+      item.subtipo
+    );
+    const updated: ExpenseCriterion = {
+      ...item,
+      naturaleza: nextNat,
+      modificadoPor: user.usuario,
+    };
+    await saveCriterionInBackend(updated, user.usuario);
+    const res = await moveCriterionNatureInBackend({
+      idCriterio: item.idCriterio,
+      categoriaPrincipal: item.categoriaPrincipal,
+      subtipo: item.subtipo,
+      nuevaNaturaleza: nextNat,
+      reclasificarHistoricos: reclassifyHistorical,
+      usuario: user.usuario,
+    });
+    setFeedback(`"${item.subtipo}" movido a ${nextNat}. ${res.message}`);
   };
 
   const handleToggleGroupNature = async (
@@ -515,15 +543,7 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({
 
                           <button
                             type="button"
-                            onClick={() =>
-                              onCriterionMoved(
-                                item.idCriterio,
-                                isFixed ? 'Costo Variable' : 'Costo Fijo',
-                                reclassifyHistorical,
-                                item.categoriaPrincipal,
-                                item.subtipo
-                              )
-                            }
+                            onClick={() => handleMoveSingleSubtype(item)}
                             title={`Mover a ${isFixed ? 'Costo Variable' : 'Costo Fijo'}`}
                             aria-label={`Mover ${item.subtipo} a ${isFixed ? 'Variable' : 'Fijo'}`}
                             className="p-1 text-slate-400 hover:text-blue-700 rounded cursor-pointer"
@@ -695,7 +715,7 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({
                 Personalización de Sedes y Cabecera de Recibos
               </h3>
               <p className="text-xs text-slate-500">
-                Edita la dirección, ubicación geográfica, teléfono, correo y presupuestos de cada sede activa para que sus recibos se impriman personalizados.
+                Dirección, celular y correo se sincronizan automáticamente desde la App de Usuarios; puedes editarlos aquí si necesitas sobrescribir la cabecera de recibos por sede.
               </p>
             </div>
           </div>
@@ -931,7 +951,7 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({
                 Control de Acceso de Usuarios al Sistema
               </h3>
               <p className="text-xs text-slate-500">
-                Define qué colaboradores del directorio pueden iniciar sesión en esta plataforma.
+                Por defecto solo <strong>Cajeros</strong>, <strong>Administradores</strong> y <strong>Gerencia</strong> pueden ingresar. Los <strong>Asesores</strong> y demás cargos están bloqueados por defecto salvo habilitación explícita.
               </p>
             </div>
           </div>
@@ -987,10 +1007,18 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({
                 .map((u) => {
                   const key = u.usuario.toUpperCase();
                   const isSelf = key === user.usuario.toUpperCase();
-                  const allowed =
-                    accessOverrides[key] !== undefined
-                      ? accessOverrides[key]
-                      : u.accesoSistema !== false;
+                  const est = String(u.estado || 'HABILITADO').toUpperCase();
+                  const disabledInMaster =
+                    est === 'DESHABILITADO' ||
+                    est === 'INACTIVO' ||
+                    est === 'BLOQUEADO' ||
+                    est === 'SUSPENDIDO';
+                  const defaultRoleAllowed = isDefaultAuthorizedRole(u.cargo);
+                  const allowed = resolveUserSystemAccess({
+                    estado: u.estado,
+                    cargo: u.cargo,
+                    override: accessOverrides[key],
+                  });
                   return (
                     <tr key={u.usuario} className="hover:bg-slate-50">
                       <td className="py-2 px-3 font-medium text-slate-900">
@@ -998,13 +1026,22 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({
                       </td>
                       <td className="py-2 px-3 font-mono text-slate-600">{u.usuario}</td>
                       <td className="py-2 px-3 text-slate-600">
-                        {u.cargo} · {u.sede}
+                        <div>
+                          {u.cargo} · {u.sede}
+                        </div>
+                        <div className="text-[10px] text-slate-400">
+                          {disabledInMaster
+                            ? 'Deshabilitado en App de Usuarios'
+                            : defaultRoleAllowed
+                            ? 'Acceso por defecto'
+                            : 'Rol restringido por defecto'}
+                        </div>
                       </td>
                       <td className="py-2 px-3 font-mono text-slate-600">{u.dni || '—'}</td>
                       <td className="py-2 px-3 text-right">
                         <button
                           type="button"
-                          disabled={isSelf}
+                          disabled={isSelf || disabledInMaster}
                           onClick={() =>
                             setAccessOverrides((prev) => ({
                               ...prev,
@@ -1109,6 +1146,11 @@ function jsonOut_(obj) {
     .setMimeType(ContentService.MimeType.JSON);
 }
 
+function isManagerCargo_(cargo) {
+  var c = String(cargo || '').toUpperCase();
+  return c.indexOf('GERENTE') !== -1 || c.indexOf('GERENCIA') !== -1 || c.indexOf('DIRECTOR') !== -1;
+}
+
 function getMainExpensesSheet_(ss) {
   var sheets = ss.getSheets();
   for (var i = 0; i < sheets.length; i++) {
@@ -1116,7 +1158,8 @@ function getMainExpensesSheet_(ss) {
     if (
       name !== 'PARAMETROS_GASTOS' &&
       name !== 'CONFIG_SEDES' &&
-      name !== 'PERMISOS_ACCESO'
+      name !== 'PERMISOS_ACCESO' &&
+      name !== 'PRESUPUESTOS_MENSUALES'
     ) {
       return sheets[i];
     }
@@ -1240,12 +1283,16 @@ function doGet(e) {
       var permSheet = ss.getSheetByName('PERMISOS_ACCESO');
       var permisos = permSheet ? sheetToObjects_(permSheet) : [];
 
+      var budgetSheet = ss.getSheetByName('PRESUPUESTOS_MENSUALES');
+      var presupuestos = budgetSheet ? sheetToObjects_(budgetSheet) : [];
+
       return jsonOut_({
         status: 'ok',
         comprobantes: comprobantes,
         criteriosGastos: criteriosGastos,
         sedes: sedes,
-        permisos: permisos
+        permisos: permisos,
+        presupuestos: presupuestos
       });
     }
 
@@ -1390,6 +1437,12 @@ function doPost(e) {
     }
 
     if (action === 'eliminarComprobante') {
+      if (!isManagerCargo_(data.cargo)) {
+        return jsonOut_({ status: 'error', message: 'Solo Gerencia puede eliminar comprobantes.' });
+      }
+      if (!String(data.claveConfirmacion || '').trim()) {
+        return jsonOut_({ status: 'error', message: 'Se requiere clave de confirmación de Gerencia.' });
+      }
       var delSheet = getMainExpensesSheet_(ss);
       var delHeaders = ensureExtendedHeaders_(delSheet);
       var delIdCol = delHeaders.indexOf('ID_REGISTRO') + 1;
@@ -1407,6 +1460,9 @@ function doPost(e) {
     }
 
     if (action === 'guardarConfigSede' || action === 'crearSede') {
+      if (!isManagerCargo_(data.cargo || 'GERENTE')) {
+        return jsonOut_({ status: 'error', message: 'Solo Gerencia puede configurar sedes.' });
+      }
       var sedeSheet = ss.getSheetByName('CONFIG_SEDES') || ss.insertSheet('CONFIG_SEDES');
       var sedeCols = [
         'Codigo_Sede', 'Nombre_Sede', 'Estado',
@@ -1501,6 +1557,9 @@ function doPost(e) {
     }
 
     if (action === 'guardarPermisosUsuarios') {
+      if (!isManagerCargo_(data.cargo || 'GERENTE')) {
+        return jsonOut_({ status: 'error', message: 'Solo Gerencia puede gestionar permisos.' });
+      }
       var hojaPerm = ss.getSheetByName('PERMISOS_ACCESO') || ss.insertSheet('PERMISOS_ACCESO');
       hojaPerm.clearContents();
       hojaPerm.appendRow(['USUARIO', 'ACCESO_PERMITIDO', 'MODIFICADO_POR', 'FECHA']);
@@ -1509,6 +1568,46 @@ function doPost(e) {
         hojaPerm.appendRow([usr, permisos[usr] ? 'SI' : 'NO', data.modificadoPor || '', new Date()]);
       });
       return jsonOut_({ status: 'ok' });
+    }
+
+    if (action === 'guardarPresupuestoMensual') {
+      if (!isManagerCargo_(data.cargo)) {
+        return jsonOut_({ status: 'error', message: 'Solo Gerencia puede asignar presupuestos mensuales.' });
+      }
+      var bSheet = ss.getSheetByName('PRESUPUESTOS_MENSUALES') || ss.insertSheet('PRESUPUESTOS_MENSUALES');
+      var bCols = [
+        'ID', 'SEDE', 'ANIO', 'MES', 'FIJO_TOTAL', 'VARIABLE_TOTAL',
+        'VISIBILIDAD_DEFECTO', 'JSON_CONFIG', 'ASIGNADO_POR', 'FECHA_ACTUALIZACION'
+      ];
+      if (bSheet.getLastRow() === 0) bSheet.appendRow(bCols);
+      var p = data.presupuesto || {};
+      var bId = String(p.id || (p.sede + '::' + p.anio + '::' + p.mes)).toUpperCase();
+      var bRows = sheetToObjects_(bSheet);
+      var bTarget = -1;
+      for (var bi = 0; bi < bRows.length; bi++) {
+        if (String(bRows[bi].ID || '').toUpperCase() === bId) {
+          bTarget = bi + 2;
+          break;
+        }
+      }
+      var bVals = [
+        bId,
+        String(p.sede || '').toUpperCase(),
+        String(p.anio || ''),
+        String(p.mes || '').toUpperCase(),
+        Number(p.presupuestoFijoTotal || 0),
+        Number(p.presupuestoVariableTotal || 0),
+        String(p.visibilidadPorDefecto || 'ALL'),
+        JSON.stringify(p),
+        String(data.usuario || ''),
+        new Date()
+      ];
+      if (bTarget > 0) {
+        bSheet.getRange(bTarget, 1, 1, bCols.length).setValues([bVals]);
+      } else {
+        bSheet.appendRow(bVals);
+      }
+      return jsonOut_({ status: 'ok', id: bId });
     }
 
     return jsonOut_({ status: 'error', message: 'Acción no reconocida: ' + action });

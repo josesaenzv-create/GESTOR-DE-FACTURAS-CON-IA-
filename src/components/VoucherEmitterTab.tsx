@@ -975,7 +975,7 @@ export const VoucherEmitterTab: React.FC<VoucherEmitterTabProps> = ({
                   <span>{CREDIBAN_COMPANY.ruc}</span>
                   <span>{formatVoucherDateTime(fecha)}</span>
                 </div>
-                <div className="flex justify-between gap-2 text-[11px]">
+                <div className="flex justify-between gap-2 text-[11px] uppercase">
                   <span className="text-left">{sedeDireccion}</span>
                   <span className="text-right">{sedeUbicacion}</span>
                 </div>

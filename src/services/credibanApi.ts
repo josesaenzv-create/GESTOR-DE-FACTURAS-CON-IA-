@@ -4,6 +4,7 @@ import {
   type AiScanResult,
   type ExpenseCriterion,
   type ExpenseRecord,
+  type MonthlySedeBudget,
   type NaturalezaGasto,
   type SedeRecord,
   type TipoComprobante,
@@ -20,7 +21,9 @@ import {
   getImpactLevel,
   getMonthNameFromIsoDate,
   getYearFromIsoDate,
+  mergeSedeMetadata,
   parseCommaDecimal,
+  resolveUserSystemAccess,
 } from '../utils/accounting';
 import { parsePeruReceiptText } from '../utils/ocrParser';
 import {
@@ -33,6 +36,7 @@ export interface BackendBundle {
   criteria: ExpenseCriterion[];
   sedes: SedeRecord[];
   users: UserSession[];
+  budgets: MonthlySedeBudget[];
   enabledSedeNames?: string[];
   source: 'live' | 'cache';
   syncMessage?: string;
@@ -43,10 +47,12 @@ const LOCAL_CACHE_KEYS = {
   criteria: 'crediban_cache_criteria_v1',
   sedes: 'crediban_cache_sedes_v1',
   sedeCustom: 'crediban_sede_custom_v1',
+  masterSedes: 'crediban_cache_master_sedes_v1',
   users: 'crediban_cache_users_v1',
   enabledSedes: 'crediban_cache_enabled_sedes_v1',
   userAccess: 'crediban_user_access_v1',
   monthlySales: 'crediban_monthly_sales_v1',
+  monthlyBudgets: 'crediban_monthly_budgets_v1',
 };
 
 function readCache<T>(key: string, fallback: T): T {
@@ -230,11 +236,10 @@ export function normalizeSedeFromBackend(row: Record<string, unknown>): SedeReco
   )
     .trim()
     .toUpperCase();
-  const seedMatch = DEFAULT_SEDES.find((s) => s.nombreSede === nombre);
   return {
-    codigoSede: String(row.Codigo_Sede || row.codigoSede || row.codigo || nombre.slice(0, 3)),
+    codigoSede: String(row.Codigo_Sede || row.codigoSede || row.codigo || '').trim(),
     nombreSede: nombre,
-    estado: String(row.Estado || row.estado || 'ACTIVO'),
+    estado: String(row.Estado || row.estado || 'ACTIVO').trim(),
     presupuestoMensualFijo: Number(
       row.Presupuesto_Mensual_Fijo || row.presupuestoMensualFijo || row.presupuestoFijo || 5000
     ),
@@ -246,26 +251,14 @@ export function normalizeSedeFromBackend(row: Record<string, unknown>): SedeReco
     ),
     nombreHojaSede: String(
       row.Nombre_Hoja_Sede || row.nombreHojaSede || row.hoja || `SEDE_${nombre}`
-    ),
-    idCarpetaDrive: String(row.ID_Carpeta_Drive || row.idCarpetaDrive || ''),
-    direccion: String(row.Direccion || row.direccion || seedMatch?.direccion || ''),
-    ubicacion: String(row.Ubicacion || row.ubicacion || seedMatch?.ubicacion || `${nombre} - PERÚ`),
-    telefono: String(row.Telefono || row.telefono || seedMatch?.telefono || ''),
-    codigoSbs: String(
-      row.Codigo_SBS ||
-        row.codigoSbs ||
-        seedMatch?.codigoSbs ||
-        'INSCRITO EN LA SBS BAJO CODIGO REGISTRAL 00038222-2025'
-    ),
-    mensajePie: String(
-      row.Mensaje_Pie || row.mensajePie || seedMatch?.mensajePie || '*** TE DESEO MUCHO EXITO ***'
-    ),
-    correoContacto: String(
-      row.Correo_Contacto ||
-        row.correoContacto ||
-        seedMatch?.correoContacto ||
-        'CREDIBANPERU@GMAIL.COM'
-    ),
+    ).trim(),
+    idCarpetaDrive: String(row.ID_Carpeta_Drive || row.idCarpetaDrive || '').trim(),
+    direccion: String(row.Direccion || row.direccion || '').trim(),
+    ubicacion: String(row.Ubicacion || row.ubicacion || '').trim(),
+    telefono: String(row.Telefono || row.telefono || row.celular || '').trim(),
+    codigoSbs: String(row.Codigo_SBS || row.codigoSbs || '').trim(),
+    mensajePie: String(row.Mensaje_Pie || row.mensajePie || '').trim(),
+    correoContacto: String(row.Correo_Contacto || row.correoContacto || row.correo || '').trim(),
   };
 }
 
@@ -353,7 +346,40 @@ export function saveMonthlySalesEntry(
 export interface MasterCatalogResult {
   users: UserSession[];
   enabledSedeNames: string[];
+  masterSedesByName: Record<string, Partial<SedeRecord>>;
   fromLive: boolean;
+}
+
+function collectMasterSedeRecord(
+  target: Record<string, Partial<SedeRecord>>,
+  raw: Record<string, unknown> | null | undefined,
+  explicitKey?: string
+): void {
+  if (!raw || typeof raw !== 'object') return;
+  const key = String(
+    explicitKey || raw.sede || raw.nombreSede || raw.nombre || raw.Nombre_Sede || ''
+  )
+    .trim()
+    .toUpperCase();
+  if (!key) return;
+  const prev = target[key] || {};
+  const codigo = String(raw.codigo || raw.codigoSede || raw.Codigo_Sede || '').trim();
+  const direccion = String(raw.direccion || raw.Direccion || '').trim();
+  const celular = String(raw.celular || raw.telefono || raw.Telefono || '').trim();
+  const correo = String(raw.correo || raw.correoContacto || raw.Correo_Contacto || '')
+    .trim()
+    .toUpperCase();
+  const ubicacion = String(raw.ubicacion || raw.Ubicacion || '').trim().toUpperCase();
+
+  target[key] = {
+    ...prev,
+    nombreSede: key,
+    codigoSede: codigo || prev.codigoSede,
+    direccion: direccion || prev.direccion,
+    telefono: celular || prev.telefono,
+    correoContacto: correo || prev.correoContacto,
+    ubicacion: ubicacion || prev.ubicacion,
+  };
 }
 
 export async function fetchMasterUsersCatalog(): Promise<MasterCatalogResult> {
@@ -375,13 +401,34 @@ export async function fetchMasterUsersCatalog(): Promise<MasterCatalogResult> {
         ? data.data
         : [];
 
-      // Parse enabled sedes from USERS_API_URL catalogos.sedesHabilitadas / sedesTodas
+      // Parse enabled sedes & live agency address/phone metadata from USERS_API_URL catalogos
       const cat = (data && typeof data === 'object' ? data.catalogos : null) as
         | {
             sedesHabilitadas?: unknown[];
-            sedesTodas?: Array<{ sede?: string; estado?: string }>;
+            sedesTodas?: Array<Record<string, unknown>>;
+            sedesDetalle?:
+              | Record<string, Record<string, unknown>>
+              | Array<Record<string, unknown>>;
           }
         | null;
+
+      const masterSedesByName: Record<string, Partial<SedeRecord>> = {};
+      if (cat && Array.isArray(cat.sedesTodas)) {
+        for (const s of cat.sedesTodas) {
+          collectMasterSedeRecord(masterSedesByName, s);
+        }
+      }
+      if (cat && cat.sedesDetalle) {
+        if (Array.isArray(cat.sedesDetalle)) {
+          for (const s of cat.sedesDetalle) {
+            collectMasterSedeRecord(masterSedesByName, s);
+          }
+        } else if (typeof cat.sedesDetalle === 'object') {
+          for (const [sedeKey, sObj] of Object.entries(cat.sedesDetalle)) {
+            collectMasterSedeRecord(masterSedesByName, sObj, sedeKey);
+          }
+        }
+      }
 
       let enabledSedeNames: string[] = [];
       if (cat && Array.isArray(cat.sedesHabilitadas)) {
@@ -402,6 +449,13 @@ export async function fetchMasterUsersCatalog(): Promise<MasterCatalogResult> {
       if (rawUsers.length > 0) {
         const normalized: UserSession[] = rawUsers
           .map((u: Record<string, unknown>) => {
+            if (u.sedeInfo && typeof u.sedeInfo === 'object') {
+              collectMasterSedeRecord(
+                masterSedesByName,
+                u.sedeInfo as Record<string, unknown>,
+                String(u.Sede || u.sede || '').trim().toUpperCase()
+              );
+            }
             const usuario = String(u.Usuario || u.usuario || u.nombre || '').trim();
             const nombreCompleto = String(
               u.nombreCompleto || u.Nombre_Completo || u.nombre || usuario
@@ -409,24 +463,20 @@ export async function fetchMasterUsersCatalog(): Promise<MasterCatalogResult> {
               .trim()
               .toUpperCase();
             const estado = String(u.Estado || u.estado || 'HABILITADO').trim().toUpperCase();
-            const masterDisabled =
-              estado === 'DESHABILITADO' ||
-              estado === 'INACTIVO' ||
-              estado === 'BLOQUEADO' ||
-              estado === 'SUSPENDIDO';
+            const cargo = String(u.Cargo || u.cargo || 'TRABAJADOR').trim().toUpperCase();
             const override = overrides[usuario.toUpperCase()];
-            // Master script disable always takes strict precedence across all apps
-            const accesoSistema = masterDisabled
-              ? false
-              : override !== undefined
-              ? override
-              : true;
+            // Default policy: only Cajeros, Administradores & Gerencia allowed unless Gerencia explicitly overrides
+            const accesoSistema = resolveUserSystemAccess({
+              estado,
+              cargo,
+              override,
+            });
 
             return {
               usuario,
               nombreCompleto,
               dni: String(u.dni || u.DNI || '').replace(/\D/g, ''),
-              cargo: String(u.Cargo || u.cargo || 'TRABAJADOR').trim().toUpperCase(),
+              cargo,
               sede: String(u.Sede || u.sede || 'HUACHO').trim().toUpperCase(),
               clave: String(u.Clave || u.clave || ''),
               estado,
@@ -437,14 +487,25 @@ export async function fetchMasterUsersCatalog(): Promise<MasterCatalogResult> {
           })
           .filter((u: UserSession) => Boolean(u.usuario));
 
+        if (Object.keys(masterSedesByName).length > 0) {
+          writeCache(LOCAL_CACHE_KEYS.masterSedes, masterSedesByName);
+        }
+
         if (normalized.length > 0) {
-          writeCache(LOCAL_CACHE_KEYS.users, normalized);
+          // Security: NEVER store plaintext user passwords ("clave") in localStorage!
+          const sanitizedForCache = normalized.map(({ clave: _clave, ...safeUser }) => safeUser);
+          writeCache(LOCAL_CACHE_KEYS.users, sanitizedForCache);
           return {
             users: normalized,
             enabledSedeNames,
+            masterSedesByName,
             fromLive: true,
           };
         }
+      }
+
+      if (Object.keys(masterSedesByName).length > 0) {
+        writeCache(LOCAL_CACHE_KEYS.masterSedes, masterSedesByName);
       }
     }
   } catch {
@@ -453,16 +514,17 @@ export async function fetchMasterUsersCatalog(): Promise<MasterCatalogResult> {
 
   const cachedUsers = readCache<UserSession[]>(
     LOCAL_CACHE_KEYS.users,
-    OFFLINE_FALLBACK_USERS
+    OFFLINE_FALLBACK_USERS.map(({ clave: _c, ...safe }) => safe)
   ).map((u) => {
     const ov = overrides[u.usuario.toUpperCase()];
-    const est = String(u.estado || 'HABILITADO').toUpperCase();
-    const disabledInMaster =
-      est === 'DESHABILITADO' || est === 'INACTIVO' || est === 'BLOQUEADO';
     return {
       ...u,
       nombreCompleto: u.nombreCompleto || u.usuario.replace(/\./g, ' '),
-      accesoSistema: disabledInMaster ? false : ov !== undefined ? ov : u.accesoSistema !== false,
+      accesoSistema: resolveUserSystemAccess({
+        estado: u.estado,
+        cargo: u.cargo,
+        override: ov,
+      }),
     };
   });
 
@@ -470,10 +532,15 @@ export async function fetchMasterUsersCatalog(): Promise<MasterCatalogResult> {
     LOCAL_CACHE_KEYS.enabledSedes,
     DEFAULT_SEDES.map((s) => s.nombreSede)
   );
+  const cachedMasterSedes = readCache<Record<string, Partial<SedeRecord>>>(
+    LOCAL_CACHE_KEYS.masterSedes,
+    {}
+  );
 
   return {
     users: cachedUsers,
     enabledSedeNames: cachedEnabledSedes,
+    masterSedesByName: cachedMasterSedes,
     fromLive: false,
   };
 }
@@ -482,6 +549,9 @@ export async function fetchUsersDirectory(): Promise<UserSession[]> {
   const { users } = await fetchMasterUsersCatalog();
   return users;
 }
+
+const ROLE_RESTRICTED_MESSAGE =
+  'Acceso restringido: por defecto solo Cajeros, Administradores y Gerencia pueden ingresar. Los asesores requieren habilitación de Gerencia.';
 
 export async function authenticateUser(
   usuario: string,
@@ -517,7 +587,7 @@ export async function authenticateUser(
     if (dirUser && dirUser.accesoSistema === false) {
       return {
         ok: false,
-        message: 'Usuario sin permiso de acceso al sistema. Consulta con Gerencia.',
+        message: ROLE_RESTRICTED_MESSAGE,
       };
     }
   }
@@ -526,15 +596,31 @@ export async function authenticateUser(
     const dataRes = loginAttempt.value;
     if (dataRes.status === 'ok' || dataRes.authenticated === true || dataRes.valido === true) {
       const raw = (dataRes.user || dataRes.usuario || dataRes) as Record<string, unknown>;
+      const resolvedUsuario = String(raw.usuario || raw.Usuario || cleanUser).toUpperCase();
+      const cargo = String(raw.cargo || raw.Cargo || 'TRABAJADOR').toUpperCase();
+      const estado = String(raw.estado || raw.Estado || 'HABILITADO').toUpperCase();
+      const explicitOverride =
+        overrides[resolvedUsuario] ?? overrides[cleanUser.toUpperCase()];
+      const allowed = resolveUserSystemAccess({
+        estado,
+        cargo,
+        override: explicitOverride,
+      });
+      if (!allowed) {
+        return {
+          ok: false,
+          message: ROLE_RESTRICTED_MESSAGE,
+        };
+      }
       return {
         ok: true,
         user: {
-          usuario: String(raw.usuario || raw.Usuario || cleanUser).toUpperCase(),
+          usuario: resolvedUsuario,
           nombreCompleto: String(raw.nombreCompleto || cleanUser.replace(/\./g, ' ')).toUpperCase(),
           dni: String(raw.dni || ''),
-          cargo: String(raw.cargo || raw.Cargo || 'TRABAJADOR').toUpperCase(),
+          cargo,
           sede: String(raw.sede || raw.Sede || 'HUACHO').toUpperCase(),
-          estado: 'HABILITADO',
+          estado,
           accesoSistema: true,
         },
       };
@@ -548,6 +634,12 @@ export async function authenticateUser(
         (!u.clave || u.clave === cleanPass)
     );
     if (matched) {
+      if (matched.accesoSistema === false) {
+        return {
+          ok: false,
+          message: ROLE_RESTRICTED_MESSAGE,
+        };
+      }
       return {
         ok: true,
         user: {
@@ -568,6 +660,17 @@ export async function authenticateUser(
     (u) => u.usuario.toLowerCase() === cleanUser.toLowerCase() && u.clave === cleanPass
   );
   if (fallbackMatch) {
+    const allowed = resolveUserSystemAccess({
+      estado: fallbackMatch.estado,
+      cargo: fallbackMatch.cargo,
+      override: overrides[fallbackMatch.usuario.toUpperCase()],
+    });
+    if (!allowed) {
+      return {
+        ok: false,
+        message: ROLE_RESTRICTED_MESSAGE,
+      };
+    }
     return {
       ok: true,
       user: {
@@ -587,50 +690,95 @@ export async function authenticateUser(
   };
 }
 
+/**
+ * Verifies a manager's password against the live user catalog / server before destructive operations.
+ */
+export async function verifyManagerPassword(
+  usuario: string,
+  clave: string
+): Promise<{ ok: boolean; message?: string }> {
+  const cleanUser = usuario.trim();
+  const cleanPass = clave.trim();
+  if (!cleanUser || !cleanPass) {
+    return { ok: false, message: 'Ingresa tu clave de Gerente para confirmar.' };
+  }
+
+  // 1. Check live directory first
+  const { users, fromLive } = await fetchMasterUsersCatalog();
+  if (fromLive) {
+    const matched = users.find(
+      (u) => u.usuario.toLowerCase() === cleanUser.toLowerCase()
+    );
+    if (matched) {
+      if (matched.accesoSistema === false) {
+        return { ok: false, message: 'Usuario deshabilitado en el Servidor.' };
+      }
+      if (matched.clave) {
+        if (matched.clave === cleanPass) {
+          return { ok: true };
+        }
+        return { ok: false, message: 'Clave incorrecta. Verifica tu contraseña.' };
+      }
+      // If directory entry omits password, verify against DATA_API_URL login action
+      try {
+        const loginCheck = await postToDataApi<Record<string, unknown>>(
+          { action: 'login', usuario: cleanUser, clave: cleanPass },
+          4500
+        );
+        if (
+          loginCheck &&
+          (loginCheck.status === 'ok' ||
+            loginCheck.authenticated === true ||
+            loginCheck.valido === true)
+        ) {
+          return { ok: true };
+        }
+      } catch {
+        // Fall through to offline fallback check
+      }
+    }
+  }
+
+  // 2. Check offline fallback credentials if server directory is unreachable or local test account
+  const fallbackMatch = OFFLINE_FALLBACK_USERS.find(
+    (u) => u.usuario.toLowerCase() === cleanUser.toLowerCase()
+  );
+  if (fallbackMatch) {
+    if (fallbackMatch.clave === cleanPass) {
+      return { ok: true };
+    }
+    return { ok: false, message: 'Clave de Gerente incorrecta.' };
+  }
+
+  return { ok: false, message: 'Clave incorrecta o no verificada.' };
+}
+
 export function loadSedeCustomizations(): Record<string, Partial<SedeRecord>> {
   return readCache<Record<string, Partial<SedeRecord>>>(LOCAL_CACHE_KEYS.sedeCustom, {});
 }
 
 function mergeSedeWithDefaultsAndCustom(
   sede: SedeRecord,
-  customMap: Record<string, Partial<SedeRecord>>
+  customMap: Record<string, Partial<SedeRecord>>,
+  masterSedesByName: Record<string, Partial<SedeRecord>> = {}
 ): SedeRecord {
   const key = sede.nombreSede.trim().toUpperCase();
   const seedMatch = DEFAULT_SEDES.find((d) => d.nombreSede === key);
   const custom = customMap[key] || {};
-  return {
-    ...seedMatch,
-    ...sede,
-    ...custom,
-    nombreSede: key,
-    direccion:
-      custom.direccion ??
-      (sede.direccion || seedMatch?.direccion || 'DIRECCIÓN POR CONFIGURAR'),
-    ubicacion:
-      custom.ubicacion ??
-      (sede.ubicacion || seedMatch?.ubicacion || `${key} - PERÚ`),
-    telefono: custom.telefono ?? sede.telefono ?? seedMatch?.telefono ?? '',
-    codigoSbs:
-      custom.codigoSbs ??
-      (sede.codigoSbs ||
-        seedMatch?.codigoSbs ||
-        'INSCRITO EN LA SBS BAJO CODIGO REGISTRAL 00038222-2025'),
-    mensajePie:
-      custom.mensajePie ??
-      (sede.mensajePie || seedMatch?.mensajePie || '*** TE DESEO MUCHO EXITO ***'),
-    correoContacto:
-      custom.correoContacto ??
-      (sede.correoContacto || seedMatch?.correoContacto || 'CREDIBANPERU@GMAIL.COM'),
-  };
+  const masterSede = masterSedesByName[key];
+  return mergeSedeMetadata({ sede, masterSede, custom, seedMatch });
 }
 
 function filterSedesByMasterCatalog(
   sedesList: SedeRecord[],
-  enabledSedeNames: string[]
+  enabledSedeNames: string[],
+  masterSedesByName: Record<string, Partial<SedeRecord>> = {}
 ): SedeRecord[] {
   const customMap = loadSedeCustomizations();
   if (!enabledSedeNames || enabledSedeNames.length === 0) {
-    return sedesList.map((s) => mergeSedeWithDefaultsAndCustom(s, customMap));
+    return sedesList.map((s) =>
+      mergeSedeWithDefaultsAndCustom(s, customMap, masterSedesByName)
+    );
   }
   const enabledSet = new Set(enabledSedeNames.map((s) => s.trim().toUpperCase()));
   const byName = new Map(sedesList.map((s) => [s.nombreSede.trim().toUpperCase(), s]));
@@ -638,11 +786,30 @@ function filterSedesByMasterCatalog(
   const filtered: SedeRecord[] = [];
   for (const enabledName of enabledSet) {
     const existing = byName.get(enabledName);
+    const masterInfo = masterSedesByName[enabledName];
     const seedMatch = DEFAULT_SEDES.find((d) => d.nombreSede === enabledName);
     if (existing) {
-      filtered.push(mergeSedeWithDefaultsAndCustom(existing, customMap));
-    } else if (seedMatch) {
-      filtered.push(mergeSedeWithDefaultsAndCustom(seedMatch, customMap));
+      filtered.push(mergeSedeWithDefaultsAndCustom(existing, customMap, masterSedesByName));
+    } else if (masterInfo || seedMatch) {
+      const baseSede: SedeRecord = seedMatch
+        ? {
+            ...seedMatch,
+            codigoSede: '',
+            direccion: '',
+            ubicacion: '',
+            telefono: '',
+          }
+        : {
+            codigoSede: '',
+            nombreSede: enabledName,
+            estado: 'ACTIVO',
+            presupuestoMensualFijo: 5000,
+            presupuestoMensualVariable: 10000,
+            nombreHojaSede: `SEDE_${enabledName}`,
+          };
+      filtered.push(
+        mergeSedeWithDefaultsAndCustom(baseSede, customMap, masterSedesByName)
+      );
     } else {
       filtered.push(
         mergeSedeWithDefaultsAndCustom(
@@ -654,7 +821,8 @@ function filterSedesByMasterCatalog(
             presupuestoMensualVariable: 10000,
             nombreHojaSede: `SEDE_${enabledName}`,
           },
-          customMap
+          customMap,
+          masterSedesByName
         )
       );
     }
@@ -704,6 +872,67 @@ export async function fetchInitialAppBundle(
 
       const rawSedes = Array.isArray(json.sedes) ? json.sedes : [];
 
+      // Sync cloud PERMISOS_ACCESO overrides if present
+      let syncedUsers = masterCatalog.users;
+      if (Array.isArray(json.permisos) && json.permisos.length > 0) {
+        const cloudOverrides: Record<string, boolean> = { ...getUserAccessOverrides() };
+        for (const pRow of json.permisos as Array<Record<string, unknown>>) {
+          const usr = String(pRow.USUARIO || pRow.usuario || '').trim().toUpperCase();
+          const allowStr = String(pRow.ACCESO_PERMITIDO || pRow.acceso || '').trim().toUpperCase();
+          if (usr) {
+            cloudOverrides[usr] = allowStr !== 'NO' && allowStr !== 'FALSE' && allowStr !== '0';
+          }
+        }
+        writeCache(LOCAL_CACHE_KEYS.userAccess, cloudOverrides);
+        syncedUsers = masterCatalog.users.map((u) => ({
+          ...u,
+          accesoSistema: resolveUserSystemAccess({
+            estado: u.estado,
+            cargo: u.cargo,
+            override: cloudOverrides[u.usuario.toUpperCase()],
+          }),
+        }));
+      }
+
+      // Sync cloud PRESUPUESTOS_MENSUALES if present
+      let cloudBudgets = loadMonthlyBudgets();
+      if (Array.isArray(json.presupuestos) && json.presupuestos.length > 0) {
+        const parsedCloud: MonthlySedeBudget[] = [];
+        for (const row of json.presupuestos as Array<Record<string, unknown>>) {
+          try {
+            const rawJson = row.JSON_CONFIG || row.jsonConfig;
+            if (typeof rawJson === 'string' && rawJson.trim().startsWith('{')) {
+              parsedCloud.push(JSON.parse(rawJson) as MonthlySedeBudget);
+            } else if (row.SEDE && row.ANIO && row.MES) {
+              parsedCloud.push({
+                id: String(row.ID || `${row.SEDE}::${row.ANIO}::${row.MES}`).toUpperCase(),
+                sede: String(row.SEDE).toUpperCase(),
+                anio: String(row.ANIO),
+                mes: String(row.MES).toUpperCase(),
+                presupuestoFijoTotal: Number(row.FIJO_TOTAL || 0),
+                presupuestoVariableTotal: Number(row.VARIABLE_TOTAL || 0),
+                partidas: [],
+                visibilidadPorDefecto:
+                  (String(row.VISIBILIDAD_DEFECTO || 'ALL') as MonthlySedeBudget['visibilidadPorDefecto']),
+                visibilidadPorUsuario: {},
+              });
+            }
+          } catch {
+            // ignore malformed row
+          }
+        }
+        if (parsedCloud.length > 0) {
+          const mergedMap = new Map<string, MonthlySedeBudget>(
+            cloudBudgets.map((b) => [b.id, b])
+          );
+          for (const cb of parsedCloud) {
+            mergedMap.set(cb.id, cb);
+          }
+          cloudBudgets = Array.from(mergedMap.values());
+          writeCache(LOCAL_CACHE_KEYS.monthlyBudgets, cloudBudgets);
+        }
+      }
+
       const expenses =
         rawExpenses.length > 0
           ? rawExpenses.map((r) => normalizeExpenseFromBackend(r as Record<string, unknown>))
@@ -726,7 +955,8 @@ export async function fetchInitialAppBundle(
       );
       const activeSedes = filterSedesByMasterCatalog(
         sedesUnique,
-        masterCatalog.enabledSedeNames
+        masterCatalog.enabledSedeNames,
+        masterCatalog.masterSedesByName
       );
 
       writeCache(LOCAL_CACHE_KEYS.expenses, expenses);
@@ -737,7 +967,8 @@ export async function fetchInitialAppBundle(
         expenses,
         criteria,
         sedes: activeSedes,
-        users: masterCatalog.users,
+        users: syncedUsers,
+        budgets: cloudBudgets,
         enabledSedeNames: masterCatalog.enabledSedeNames,
         source: 'live',
       };
@@ -750,7 +981,8 @@ export async function fetchInitialAppBundle(
   const cachedSedes = readCache<SedeRecord[]>(LOCAL_CACHE_KEYS.sedes, DEFAULT_SEDES);
   const activeCachedSedes = filterSedesByMasterCatalog(
     cachedSedes,
-    masterFallback.enabledSedeNames
+    masterFallback.enabledSedeNames,
+    masterFallback.masterSedesByName
   );
 
   return {
@@ -758,6 +990,7 @@ export async function fetchInitialAppBundle(
     criteria: readCache<ExpenseCriterion[]>(LOCAL_CACHE_KEYS.criteria, DEFAULT_CRITERIA),
     sedes: activeCachedSedes,
     users: masterFallback.users,
+    budgets: loadMonthlyBudgets(),
     enabledSedeNames: masterFallback.enabledSedeNames,
     source: 'cache',
     syncMessage: 'Trabajando con caché local sincronizada.',
@@ -903,23 +1136,87 @@ export async function updateExpenseInBackend(
   return { ok: true, savedRecord: updatedRecord, syncedToCloud: synced, message: msg };
 }
 
+export function loadMonthlyBudgets(): MonthlySedeBudget[] {
+  return readCache<MonthlySedeBudget[]>(LOCAL_CACHE_KEYS.monthlyBudgets, []);
+}
+
+export async function saveMonthlyBudgetInBackend(
+  budget: MonthlySedeBudget,
+  managerUsuario: string,
+  managerCargo: string
+): Promise<{ ok: boolean; syncedToCloud: boolean; message: string }> {
+  const enriched: MonthlySedeBudget = {
+    ...budget,
+    asignadoPor: managerUsuario,
+    updatedAt: new Date().toISOString(),
+  };
+
+  const current = loadMonthlyBudgets();
+  const next = [enriched, ...current.filter((b) => b.id !== enriched.id)];
+  writeCache(LOCAL_CACHE_KEYS.monthlyBudgets, next);
+
+  try {
+    const res = await postToDataApi<Record<string, unknown>>(
+      {
+        action: 'guardarPresupuestoMensual',
+        usuario: managerUsuario,
+        cargo: managerCargo,
+        presupuesto: enriched,
+      },
+      6500
+    );
+    if (res && res.status !== 'error') {
+      return {
+        ok: true,
+        syncedToCloud: true,
+        message: `Presupuesto de ${enriched.sede} (${enriched.mes} ${enriched.anio}) guardado en el Servidor.`,
+      };
+    }
+  } catch {
+    // Fallback saved locally
+  }
+  return {
+    ok: true,
+    syncedToCloud: false,
+    message: `Presupuesto de ${enriched.sede} (${enriched.mes} ${enriched.anio}) guardado localmente.`,
+  };
+}
+
 export async function deleteExpenseInBackend(
   id: string,
-  usuario: UserSession
+  usuario: UserSession,
+  claveConfirmacion?: string
 ): Promise<{ ok: boolean; syncedToCloud: boolean; message: string }> {
   let synced = false;
   let msg = 'Registro eliminado localmente.';
   try {
-    const res = await postToDataApi<Record<string, unknown>>({
-      action: 'eliminarComprobante',
-      idRegistro: id,
-      usuario: usuario.usuario,
-      cargo: usuario.cargo,
-      sede: usuario.sede,
-    });
+    const res = await postToDataApi<Record<string, unknown>>(
+      {
+        action: 'eliminarComprobante',
+        idRegistro: id,
+        usuario: usuario.usuario,
+        cargo: usuario.cargo,
+        sede: usuario.sede,
+        claveConfirmacion: claveConfirmacion || '',
+      },
+      6500
+    );
     if (res && res.status !== 'error') {
       synced = true;
       msg = 'Comprobante eliminado del Servidor.';
+    } else if (res && res.status === 'error') {
+      const serverMsg = String(res.message || '');
+      const isAuthRejection =
+        /geren|autoriz|clave|permiso|restring/i.test(serverMsg);
+      if (isAuthRejection) {
+        return {
+          ok: false,
+          syncedToCloud: false,
+          message: serverMsg || 'No autorizado para eliminar este comprobante.',
+        };
+      }
+      // If ID was already absent or only in local/seed cache, proceed to clean locally
+      msg = 'Registro eliminado localmente.';
     }
   } catch {
     // Local cache fallback

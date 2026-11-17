@@ -9,6 +9,7 @@ import {
   FileText,
   Filter,
   RotateCcw,
+  Trash2,
 } from 'lucide-react';
 import {
   MONTH_NAMES,
@@ -29,6 +30,7 @@ import {
   parseCsvRecords,
 } from '../utils/searchAndPivot';
 import { CustomPdfModal } from './CustomPdfModal';
+import { ManagerDeleteModal } from './ManagerDeleteModal';
 
 interface SearchTabProps {
   expenses: ExpenseRecord[];
@@ -38,6 +40,7 @@ interface SearchTabProps {
   userName?: string;
   isMobileMode?: boolean;
   onSelectExpense: (record: ExpenseRecord) => void;
+  onDeleteExpense?: (id: string) => void;
   onImportCsvRecords: (records: ExpenseRecord[]) => void;
 }
 
@@ -49,9 +52,10 @@ export const SearchTab: React.FC<SearchTabProps> = ({
   userName = 'USUARIO CREDIBAN',
   isMobileMode = false,
   onSelectExpense,
+  onDeleteExpense,
   onImportCsvRecords,
 }) => {
-  const isManager = user ? isManagerUser(user) : true;
+  const isManager = user ? isManagerUser(user) : false;
   const userSede = user?.sede || 'TODAS';
 
   const [query, setQuery] = useState('');
@@ -67,6 +71,7 @@ export const SearchTab: React.FC<SearchTabProps> = ({
   const [showFilters, setShowFilters] = useState<boolean>(true);
   const [importMsg, setImportMsg] = useState('');
   const [showPdfModal, setShowPdfModal] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<ExpenseRecord | null>(null);
   const csvInputRef = useRef<HTMLInputElement>(null);
 
   const years = useMemo(() => {
@@ -589,14 +594,26 @@ export const SearchTab: React.FC<SearchTabProps> = ({
                   <span className="text-xs text-slate-600 truncate">
                     {r.naturaleza} · {r.subtipo}
                   </span>
-                  <button
-                    type="button"
-                    onClick={() => onSelectExpense(r)}
-                    className="px-3 py-1.5 text-xs font-semibold text-[#1B4332] bg-emerald-50 hover:bg-emerald-100 rounded-lg inline-flex items-center gap-1 cursor-pointer shrink-0"
-                  >
-                    <Eye className="w-3.5 h-3.5" />
-                    <span>Ver</span>
-                  </button>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => onSelectExpense(r)}
+                      className="px-3 py-1.5 text-xs font-semibold text-[#1B4332] bg-emerald-50 hover:bg-emerald-100 rounded-lg inline-flex items-center gap-1 cursor-pointer"
+                    >
+                      <Eye className="w-3.5 h-3.5" />
+                      <span>Ver</span>
+                    </button>
+                    {isManager && user && onDeleteExpense && (
+                      <button
+                        type="button"
+                        onClick={() => setDeleteTarget(r)}
+                        aria-label={`Eliminar comprobante ${r.numeroComprobante || r.id}`}
+                        className="p-1.5 text-red-700 bg-red-50 hover:bg-red-100 border border-red-200 rounded-lg cursor-pointer"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
                 </div>
               </div>
             ))}
@@ -653,14 +670,27 @@ export const SearchTab: React.FC<SearchTabProps> = ({
                       {r.total.toFixed(2)}
                     </td>
                     <td className="py-2.5 px-4 text-right whitespace-nowrap">
-                      <button
-                        type="button"
-                        onClick={() => onSelectExpense(r)}
-                        className="px-2.5 py-1 text-xs font-medium text-[#1B4332] bg-emerald-50 hover:bg-emerald-100 rounded-md inline-flex items-center gap-1 cursor-pointer"
-                      >
-                        <Eye className="w-3.5 h-3.5" />
-                        <span>Ver</span>
-                      </button>
+                      <div className="inline-flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => onSelectExpense(r)}
+                          className="px-2.5 py-1 text-xs font-medium text-[#1B4332] bg-emerald-50 hover:bg-emerald-100 rounded-md inline-flex items-center gap-1 cursor-pointer"
+                        >
+                          <Eye className="w-3.5 h-3.5" />
+                          <span>Ver</span>
+                        </button>
+                        {isManager && user && onDeleteExpense && (
+                          <button
+                            type="button"
+                            onClick={() => setDeleteTarget(r)}
+                            aria-label={`Eliminar comprobante ${r.numeroComprobante || r.id}`}
+                            title="Eliminar registro con clave"
+                            className="p-1 text-red-700 hover:bg-red-50 border border-red-200 rounded-md cursor-pointer"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -691,6 +721,15 @@ export const SearchTab: React.FC<SearchTabProps> = ({
             busqueda: query.trim() || undefined,
             generadoPor: userName.toUpperCase(),
           }}
+        />
+      )}
+
+      {isManager && user && deleteTarget && onDeleteExpense && (
+        <ManagerDeleteModal
+          record={deleteTarget}
+          user={user}
+          onClose={() => setDeleteTarget(null)}
+          onDeleted={onDeleteExpense}
         />
       )}
     </div>

@@ -7,10 +7,13 @@ import {
   formatCommaDecimal,
   getImpactLevel,
   getMonthNameFromIsoDate,
+  isDefaultAuthorizedRole,
   isManagerUser,
+  mergeSedeMetadata,
   parseCommaDecimal,
+  resolveUserSystemAccess,
 } from './accounting';
-import { SEED_EXPENSES } from '../data/seedData';
+import { DEFAULT_SEDES, SEED_EXPENSES } from '../data/seedData';
 
 test('calculateIgvBreakdown computes 18% IGV for FACTURA and 0 for BOLETA/RECIBO', () => {
   const factura = calculateIgvBreakdown(118, 'FACTURA');
@@ -95,4 +98,100 @@ test('getMonthNameFromIsoDate and isManagerUser work accurately', () => {
     isManagerUser({ usuario: 'ASESOR1', cargo: 'ASESOR', sede: 'HUARAZ' }),
     false
   );
+});
+
+test('isDefaultAuthorizedRole allows only Cajeros, Administradores and Gerencia by default', () => {
+  assert.equal(isDefaultAuthorizedRole('Cajero'), true);
+  assert.equal(isDefaultAuthorizedRole('CAJERA'), true);
+  assert.equal(isDefaultAuthorizedRole('Administrador'), true);
+  assert.equal(isDefaultAuthorizedRole('ADMINISTRADOR DE SEDE'), true);
+  assert.equal(isDefaultAuthorizedRole('Gerente'), true);
+  assert.equal(isDefaultAuthorizedRole('GERENTE GENERAL'), true);
+
+  // Blocked by default
+  assert.equal(isDefaultAuthorizedRole('Asesor'), false);
+  assert.equal(isDefaultAuthorizedRole('ASESOR DE NEGOCIOS'), false);
+  assert.equal(isDefaultAuthorizedRole('Jefe de Equipo'), false);
+  assert.equal(isDefaultAuthorizedRole('Trabajador'), false);
+  assert.equal(isDefaultAuthorizedRole(''), false);
+});
+
+test('resolveUserSystemAccess enforces master disabled, explicit override, then role policy', () => {
+  // Cajero & Administrador allowed by default
+  assert.equal(resolveUserSystemAccess({ estado: 'HABILITADO', cargo: 'Cajero' }), true);
+  assert.equal(resolveUserSystemAccess({ estado: 'HABILITADO', cargo: 'Administrador' }), true);
+
+  // Asesor blocked by default, unless explicitly allowed by Gerencia
+  assert.equal(resolveUserSystemAccess({ estado: 'HABILITADO', cargo: 'Asesor' }), false);
+  assert.equal(
+    resolveUserSystemAccess({ estado: 'HABILITADO', cargo: 'Asesor', override: true }),
+    true
+  );
+
+  // Master disabled blocks even Gerente/Cajero with override=true
+  assert.equal(
+    resolveUserSystemAccess({ estado: 'DESHABILITADO', cargo: 'Cajero', override: true }),
+    false
+  );
+  assert.equal(
+    resolveUserSystemAccess({ estado: 'HABILITADO', cargo: 'Cajero', override: false }),
+    false
+  );
+});
+
+test('mergeSedeMetadata uses live Users API direccion & celular when CONFIG_SEDES is empty', () => {
+  const seedHuacho = DEFAULT_SEDES.find((s) => s.nombreSede === 'HUACHO');
+  const merged = mergeSedeMetadata({
+    sede: {
+      codigoSede: '',
+      nombreSede: 'HUACHO',
+      estado: 'ACTIVO',
+      presupuestoMensualFijo: 5000,
+      presupuestoMensualVariable: 4000,
+      direccion: '',
+      telefono: '',
+      ubicacion: '',
+    },
+    masterSede: {
+      codigoSede: 'SED-HUA',
+      nombreSede: 'HUACHO',
+      direccion: 'Av. 28 de Julio / Sede Central Huacho',
+      telefono: '999111222',
+      correoContacto: 'credibanperu@gmail.com',
+    },
+    custom: {
+      direccion: '',
+      telefono: '',
+    },
+    seedMatch: seedHuacho,
+  });
+
+  assert.equal(merged.codigoSede, 'SED-HUA');
+  assert.equal(merged.direccion, 'Av. 28 de Julio / Sede Central Huacho');
+  assert.equal(merged.telefono, '999111222');
+
+  // Explicit manager custom edit overrides Users API
+  const withCustom = mergeSedeMetadata({
+    sede: {
+      codigoSede: '',
+      nombreSede: 'HUACHO',
+      estado: 'ACTIVO',
+      presupuestoMensualFijo: 5000,
+      presupuestoMensualVariable: 4000,
+      direccion: '',
+      telefono: '',
+    },
+    masterSede: {
+      direccion: 'Av. 28 de Julio / Sede Central Huacho',
+      telefono: '999111222',
+    },
+    custom: {
+      direccion: 'CALLE NUEVA 456',
+      telefono: '988777666',
+    },
+    seedMatch: seedHuacho,
+  });
+
+  assert.equal(withCustom.direccion, 'CALLE NUEVA 456');
+  assert.equal(withCustom.telefono, '988777666');
 });

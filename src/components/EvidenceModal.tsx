@@ -20,13 +20,18 @@ import {
   calculateIgvBreakdown,
   formatCurrencySoles,
   getImpactLevel,
+  isManagerUser,
 } from '../utils/accounting';
-import {
-  deleteExpenseInBackend,
-  updateExpenseInBackend,
-} from '../services/credibanApi';
+import { updateExpenseInBackend } from '../services/credibanApi';
 import { processInvoiceImageFile } from '../utils/imageProcessor';
 import { CredibanLogo } from './CredibanLogo';
+import { ManagerDeleteModal } from './ManagerDeleteModal';
+
+function isSafeMediaUrl(raw?: string): boolean {
+  const s = String(raw || '').trim();
+  if (!s) return false;
+  return /^https?:\/\//i.test(s) || /^data:image\//i.test(s);
+}
 
 interface EvidenceModalProps {
   record: ExpenseRecord;
@@ -43,9 +48,10 @@ export const EvidenceModal: React.FC<EvidenceModalProps> = ({
   onUpdated,
   onDeleted,
 }) => {
+  const isManager = isManagerUser(user);
   const [imgFailed, setImgFailed] = useState(false);
   const [editing, setEditing] = useState(false);
-  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [busy, setBusy] = useState(false);
   const [photoStatusMsg, setPhotoStatusMsg] = useState('');
   const signedCamRef = useRef<HTMLInputElement>(null);
@@ -119,18 +125,9 @@ export const EvidenceModal: React.FC<EvidenceModalProps> = ({
     }
   };
 
-  const handleDelete = async () => {
-    setBusy(true);
-    try {
-      await deleteExpenseInBackend(record.id, user);
-      onDeleted(record.id);
-      onClose();
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const photoUrl = record.linkFotoHd || record.linkFotoView || '';
+  const rawPhotoUrl = record.linkFotoHd || record.linkFotoView || '';
+  const photoUrl = isSafeMediaUrl(rawPhotoUrl) ? rawPhotoUrl : '';
+  const safeExternalViewUrl = isSafeMediaUrl(record.linkFotoView) ? record.linkFotoView : '';
 
   return (
     <div
@@ -205,9 +202,9 @@ export const EvidenceModal: React.FC<EvidenceModalProps> = ({
                   onError={() => setImgFailed(true)}
                   className="w-full max-h-[50vh] object-contain rounded-lg border border-slate-200 bg-white"
                 />
-                {record.linkFotoView && (
+                {safeExternalViewUrl && (
                   <a
-                    href={record.linkFotoView}
+                    href={safeExternalViewUrl}
                     target="_blank"
                     rel="noreferrer"
                     className="text-xs font-medium text-[#1B4332] hover:text-[#59B447] flex items-center gap-1"
@@ -312,8 +309,11 @@ export const EvidenceModal: React.FC<EvidenceModalProps> = ({
                     >
                       <option value="FACTURA">FACTURA</option>
                       <option value="BOLETA">BOLETA</option>
-                      <option value="TICKET DE VENTA">TICKET DE VENTA</option>
+                      <option value="YAPE / PLIN / TRANSFERENCIA">YAPE / PLIN / TRANSFERENCIA</option>
                       <option value="RECIBO DE CAJA">RECIBO DE CAJA</option>
+                      <option value="RECIBO DE MOVILIDAD">RECIBO DE MOVILIDAD</option>
+                      <option value="TICKET DE VENTA">TICKET DE VENTA</option>
+                      <option value="SOLO CAPTURA">SOLO CAPTURA</option>
                     </select>
                   </div>
                   <div>
@@ -446,33 +446,14 @@ export const EvidenceModal: React.FC<EvidenceModalProps> = ({
                     <span>Editar Comprobante</span>
                   </button>
 
-                  {confirmDelete ? (
-                    <div className="flex items-center gap-2">
-                      <span className="text-xs text-red-700 font-medium">¿Confirmar anulación?</span>
-                      <button
-                        type="button"
-                        disabled={busy}
-                        onClick={handleDelete}
-                        className="px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white text-xs font-semibold rounded-lg cursor-pointer"
-                      >
-                        Sí, Eliminar
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setConfirmDelete(false)}
-                        className="px-3 py-1.5 bg-slate-100 text-slate-700 text-xs font-medium rounded-lg cursor-pointer"
-                      >
-                        No
-                      </button>
-                    </div>
-                  ) : (
+                  {isManager && (
                     <button
                       type="button"
-                      onClick={() => setConfirmDelete(true)}
+                      onClick={() => setShowDeleteModal(true)}
                       className="px-3.5 py-2 text-red-700 hover:bg-red-50 border border-red-200 text-xs font-semibold rounded-lg flex items-center gap-1.5 cursor-pointer"
                     >
                       <Trash2 className="w-3.5 h-3.5" />
-                      <span>Anular / Eliminar</span>
+                      <span>Eliminar con Clave</span>
                     </button>
                   )}
                 </div>
@@ -481,6 +462,18 @@ export const EvidenceModal: React.FC<EvidenceModalProps> = ({
           </div>
         </div>
       </div>
+
+      {isManager && showDeleteModal && (
+        <ManagerDeleteModal
+          record={record}
+          user={user}
+          onClose={() => setShowDeleteModal(false)}
+          onDeleted={(deletedId) => {
+            onDeleted(deletedId);
+            onClose();
+          }}
+        />
+      )}
     </div>
   );
 };

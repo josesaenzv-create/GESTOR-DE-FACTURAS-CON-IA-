@@ -7,6 +7,7 @@ import {
   FileText,
   RotateCcw,
   ReceiptText,
+  Trash2,
 } from 'lucide-react';
 import {
   MONTH_NAMES,
@@ -30,6 +31,7 @@ import {
 } from '../services/credibanApi';
 import { DashboardCharts } from './DashboardCharts';
 import { CustomPdfModal } from './CustomPdfModal';
+import { ManagerDeleteModal } from './ManagerDeleteModal';
 
 interface DashboardTabProps {
   user: UserSession;
@@ -37,6 +39,7 @@ interface DashboardTabProps {
   sedes: SedeRecord[];
   criteria?: ExpenseCriterion[];
   onSelectExpense: (record: ExpenseRecord) => void;
+  onDeleteExpense?: (id: string) => void;
 }
 
 export const DashboardTab: React.FC<DashboardTabProps> = ({
@@ -45,6 +48,7 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
   sedes,
   criteria = [],
   onSelectExpense,
+  onDeleteExpense,
 }) => {
   const isManager = isManagerUser(user);
 
@@ -68,6 +72,7 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
   const [filterCategoria, setFilterCategoria] = useState<string>('TODAS');
   const [filterSubtipo, setFilterSubtipo] = useState<string>('TODOS');
   const [showPdfModal, setShowPdfModal] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<ExpenseRecord | null>(null);
 
   // Sales IGV Entry (ONLY 2 items: Mes + Monto Boleteado)
   const [salesEntries, setSalesEntries] = useState<MonthlySalesEntry[]>(() =>
@@ -744,14 +749,27 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
                                                   </span>{' '}
                                                   — {rec.nombreComercial || rec.razonSocial} ({rec.sede})
                                                 </div>
-                                                <button
-                                                  type="button"
-                                                  onClick={() => onSelectExpense(rec)}
-                                                  className="px-2 py-1 text-[11px] font-medium text-[#1B4332] hover:bg-emerald-100 rounded inline-flex items-center gap-1 cursor-pointer shrink-0"
-                                                >
-                                                  <Eye className="w-3 h-3" />
-                                                  <span>Detalle</span>
-                                                </button>
+                                                <div className="flex items-center gap-1.5 shrink-0">
+                                                  <button
+                                                    type="button"
+                                                    onClick={() => onSelectExpense(rec)}
+                                                    className="px-2 py-1 text-[11px] font-medium text-[#1B4332] hover:bg-emerald-100 rounded inline-flex items-center gap-1 cursor-pointer"
+                                                  >
+                                                    <Eye className="w-3 h-3" />
+                                                    <span>Detalle</span>
+                                                  </button>
+                                                  {isManager && onDeleteExpense && (
+                                                    <button
+                                                      type="button"
+                                                      onClick={() => setDeleteTarget(rec)}
+                                                      aria-label={`Eliminar comprobante ${rec.numeroComprobante || rec.id}`}
+                                                      title="Eliminar con clave"
+                                                      className="p-1 text-red-700 hover:bg-red-50 border border-red-200 rounded cursor-pointer"
+                                                    >
+                                                      <Trash2 className="w-3 h-3" />
+                                                    </button>
+                                                  )}
+                                                </div>
                                               </div>
                                             </td>
                                             <td className="py-2 px-4 text-right font-mono tabular-nums">
@@ -806,6 +824,15 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
           },
         }}
       />
+
+      {isManager && deleteTarget && onDeleteExpense && (
+        <ManagerDeleteModal
+          record={deleteTarget}
+          user={user}
+          onClose={() => setDeleteTarget(null)}
+          onDeleted={onDeleteExpense}
+        />
+      )}
     </div>
   );
 };

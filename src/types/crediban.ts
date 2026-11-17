@@ -181,3 +181,34 @@ export interface GpsLocationState {
   province: string;
   mapsLink: string;
 }
+
+export type BudgetVisibilityMode =
+  | 'ALL'
+  | 'ONLY_VARIABLE'
+  | 'ONLY_FIXED'
+  | 'SUMMARY_ONLY'
+  | 'HIDDEN';
+
+export interface BudgetLineItem {
+  id: string;
+  naturaleza: NaturalezaGasto;
+  concepto: string;
+  categoriaMatch?: string;
+  montoAsignado: number;
+}
+
+export interface MonthlySedeBudget {
+  id: string; // `${SEDE}::${ANIO}::${MES}`
+  sede: string;
+  anio: string;
+  mes: string;
+  presupuestoFijoTotal: number;
+  presupuestoVariableTotal: number;
+  partidas: BudgetLineItem[];
+  visibilidadPorDefecto: BudgetVisibilityMode;
+  visibilidadPorUsuario: Record<string, BudgetVisibilityMode>;
+  notasGerencia?: string;
+  asignadoPor?: string;
+  updatedAt?: string;
+}
+
