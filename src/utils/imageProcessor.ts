@@ -1,4 +1,28 @@
+export type ImageFilterMode = 'original' | 'bw' | 'high-contrast' | 'grayscale';
+
+export interface ImageEditSettings {
+  rotation: 0 | 90 | 180 | 270;
+  filterMode: ImageFilterMode;
+  brightness: number; // 50..160 (default 100)
+  contrast: number; // 50..200 (default 100)
+  crop: {
+    left: number; // 0..0.45
+    top: number; // 0..0.45
+    right: number; // 0..0.45
+    bottom: number; // 0..0.45
+  };
+}
+
+export const DEFAULT_IMAGE_EDITS: ImageEditSettings = {
+  rotation: 0,
+  filterMode: 'original',
+  brightness: 100,
+  contrast: 100,
+  crop: { left: 0, top: 0, right: 0, bottom: 0 },
+};
+
 export interface ProcessedInvoiceImages {
+  originalDataUrl: string;
   hdDataUrl: string;
   hdBase64: string;
   iaDataUrl: string;
@@ -7,53 +31,142 @@ export interface ProcessedInvoiceImages {
   height: number;
 }
 
-function loadImageFromFile(file: File): Promise<HTMLImageElement> {
+export function loadImageFromSrc(src: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('No se pudo cargar la imagen.'));
+    img.src = src;
+  });
+}
+
+export function readFileAsDataUrl(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onerror = () => reject(new Error('No se pudo leer el archivo de imagen.'));
-    reader.onload = () => {
-      const img = new Image();
-      img.onload = () => resolve(img);
-      img.onerror = () => reject(new Error('El archivo seleccionado no es una imagen válida.'));
-      img.src = String(reader.result);
-    };
+    reader.onload = () => resolve(String(reader.result));
     reader.readAsDataURL(file);
   });
 }
 
-function resizeWithCanvas(
+function applyPixelFilters(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  edits: ImageEditSettings
+) {
+  const { filterMode, brightness, contrast } = edits;
+  if (
+    filterMode === 'original' &&
+    brightness === 100 &&
+    contrast === 100
+  ) {
+    return;
+  }
+
+  const imageData = ctx.getImageData(0, 0, width, height);
+  const data = imageData.data;
+
+  const brightFactor = brightness / 100;
+  const contrastAdj =
+    filterMode === 'high-contrast'
+      ? Math.max(contrast, 145)
+      : filterMode === 'bw'
+      ? Math.max(contrast, 155)
+      : contrast;
+  const cFactor = (259 * (contrastAdj - 100 + 255)) / (255 * (259 - (contrastAdj - 100)));
+
+  for (let i = 0; i < data.length; i += 4) {
+    let r = data[i] * brightFactor;
+    let g = data[i + 1] * brightFactor;
+    let b = data[i + 2] * brightFactor;
+
+    r = cFactor * (r - 128) + 128;
+    g = cFactor * (g - 128) + 128;
+    b = cFactor * (b - 128) + 128;
+
+    if (filterMode === 'grayscale' || filterMode === 'bw') {
+      let lum = 0.299 * r + 0.587 * g + 0.114 * b;
+      if (filterMode === 'bw') {
+        // Crisp scanner boost: darken ink, lighten thermal paper background
+        lum = lum < 138 ? lum * 0.55 : Math.min(255, lum * 1.18 + 20);
+      }
+      r = lum;
+      g = lum;
+      b = lum;
+    }
+
+    data[i] = Math.max(0, Math.min(255, r));
+    data[i + 1] = Math.max(0, Math.min(255, g));
+    data[i + 2] = Math.max(0, Math.min(255, b));
+  }
+
+  ctx.putImageData(imageData, 0, 0);
+}
+
+function renderEditedToCanvas(
   img: HTMLImageElement,
+  edits: ImageEditSettings,
   maxSide: number,
   quality: number
 ): { dataUrl: string; base64: string; width: number; height: number } {
-  const ratio = Math.min(1, maxSide / Math.max(img.width, img.height));
-  const width = Math.max(1, Math.round(img.width * ratio));
-  const height = Math.max(1, Math.round(img.height * ratio));
+  // 1. Rotate onto intermediate canvas first if needed
+  const rotRad = (edits.rotation * Math.PI) / 180;
+  const swap = edits.rotation === 90 || edits.rotation === 270;
+  const rotW = swap ? img.height : img.width;
+  const rotH = swap ? img.width : img.height;
 
-  const canvas = document.createElement('canvas');
-  canvas.width = width;
-  canvas.height = height;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) {
-    throw new Error('No se pudo inicializar el procesador gráfico Canvas.');
-  }
-  ctx.fillStyle = '#ffffff';
-  ctx.fillRect(0, 0, width, height);
-  ctx.drawImage(img, 0, 0, width, height);
+  const rotCanvas = document.createElement('canvas');
+  rotCanvas.width = rotW;
+  rotCanvas.height = rotH;
+  const rotCtx = rotCanvas.getContext('2d');
+  if (!rotCtx) throw new Error('Error al inicializar Canvas.');
 
-  const dataUrl = canvas.toDataURL('image/jpeg', quality);
+  rotCtx.fillStyle = '#ffffff';
+  rotCtx.fillRect(0, 0, rotW, rotH);
+  rotCtx.translate(rotW / 2, rotH / 2);
+  rotCtx.rotate(rotRad);
+  rotCtx.drawImage(img, -img.width / 2, -img.height / 2);
+
+  // 2. Apply crop coordinates on rotated image
+  const sx = Math.round(edits.crop.left * rotW);
+  const sy = Math.round(edits.crop.top * rotH);
+  const sw = Math.max(20, Math.round((1 - edits.crop.left - edits.crop.right) * rotW));
+  const sh = Math.max(20, Math.round((1 - edits.crop.top - edits.crop.bottom) * rotH));
+
+  // 3. Scale to maxSide
+  const ratio = Math.min(1, maxSide / Math.max(sw, sh));
+  const outW = Math.max(1, Math.round(sw * ratio));
+  const outH = Math.max(1, Math.round(sh * ratio));
+
+  const outCanvas = document.createElement('canvas');
+  outCanvas.width = outW;
+  outCanvas.height = outH;
+  const outCtx = outCanvas.getContext('2d');
+  if (!outCtx) throw new Error('Error al inicializar Canvas de salida.');
+
+  outCtx.fillStyle = '#ffffff';
+  outCtx.fillRect(0, 0, outW, outH);
+  outCtx.drawImage(rotCanvas, sx, sy, sw, sh, 0, 0, outW, outH);
+
+  // 4. Pixel-level contrast / brightness / B&W scanner enhancement
+  applyPixelFilters(outCtx, outW, outH, edits);
+
+  const dataUrl = outCanvas.toDataURL('image/jpeg', quality);
   const base64 = dataUrl.replace(/^data:image\/jpeg;base64,/, '');
-  return { dataUrl, base64, width, height };
+  return { dataUrl, base64, width: outW, height: outH };
 }
 
-export async function processInvoiceImageFile(file: File): Promise<ProcessedInvoiceImages> {
-  const img = await loadImageFromFile(file);
-  // Full HD copy (max 2200px, JPEG 0.94)
-  const hd = resizeWithCanvas(img, 2200, 0.94);
-  // Lightweight AI copy (max 1024px, JPEG 0.80)
-  const ia = resizeWithCanvas(img, 1024, 0.8);
+export async function processEditedInvoiceImage(
+  originalDataUrl: string,
+  edits: ImageEditSettings = DEFAULT_IMAGE_EDITS
+): Promise<ProcessedInvoiceImages> {
+  const img = await loadImageFromSrc(originalDataUrl);
+  const hd = renderEditedToCanvas(img, edits, 2200, 0.94);
+  const ia = renderEditedToCanvas(img, edits, 1024, 0.82);
 
   return {
+    originalDataUrl,
     hdDataUrl: hd.dataUrl,
     hdBase64: hd.base64,
     iaDataUrl: ia.dataUrl,
@@ -61,6 +174,11 @@ export async function processInvoiceImageFile(file: File): Promise<ProcessedInvo
     width: hd.width,
     height: hd.height,
   };
+}
+
+export async function processInvoiceImageFile(file: File): Promise<ProcessedInvoiceImages> {
+  const dataUrl = await readFileAsDataUrl(file);
+  return processEditedInvoiceImage(dataUrl, DEFAULT_IMAGE_EDITS);
 }
 
 export interface DirectoryHandleLike {

@@ -57,15 +57,6 @@ async function startServer() {
 
   app.post('/api/scan-invoice', async (req: Request, res: Response) => {
     try {
-      const ai = getGeminiClient();
-      if (!ai) {
-        res.status(503).json({
-          error:
-            'GEMINI_API_KEY no está configurada en el servidor. Configúrala en Settings > Secrets para activar el escaneo automático o completa el formulario manualmente.',
-        });
-        return;
-      }
-
       const { imageBase64, mimeType, criteria } = req.body as {
         imageBase64?: string;
         mimeType?: string;
@@ -80,6 +71,16 @@ async function startServer() {
 
       if (!imageBase64) {
         res.status(400).json({ error: 'No se recibió imagen del comprobante.' });
+        return;
+      }
+
+      const ai = getGeminiClient();
+      if (!ai) {
+        res.json({
+          result: null,
+          fallback: 'ocr-local',
+          reason: 'Modo OCR gratuito local activo.',
+        });
         return;
       }
 
@@ -112,45 +113,73 @@ ${OFFICIAL_CATEGORIES.map((c) => `  * ${c}`).join('\n')}
 ${criteriaSummary}
 9. "scoreConfiabilidad": Puntaje entre 0.0 y 1.0 indicando qué tan legible es la foto.`;
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-4-hydrogen',
-        contents: {
-          parts: [
-            {
-              inlineData: {
-                mimeType: safeMime,
-                data: cleanBase64,
+      const modelsToTry = ['gemini-4-hydrogen', 'gemini-3.1-flash-lite'] as const;
+      let rawText = '';
+      let lastError: unknown = null;
+
+      for (const model of modelsToTry) {
+        try {
+          const response = await ai.models.generateContent({
+            model,
+            contents: {
+              parts: [
+                {
+                  inlineData: {
+                    mimeType: safeMime,
+                    data: cleanBase64,
+                  },
+                },
+                { text: prompt },
+              ],
+            },
+            config: {
+              responseMimeType: 'application/json',
+              responseSchema: {
+                type: Type.OBJECT,
+                properties: {
+                  tipoComprobante: { type: Type.STRING },
+                  numeroComprobante: { type: Type.STRING },
+                  fechaEmision: { type: Type.STRING },
+                  ruc: { type: Type.STRING },
+                  razonSocial: { type: Type.STRING },
+                  nombreComercial: { type: Type.STRING },
+                  subtotal: { type: Type.NUMBER },
+                  igv: { type: Type.NUMBER },
+                  total: { type: Type.NUMBER },
+                  naturaleza: { type: Type.STRING },
+                  categoria: { type: Type.STRING },
+                  subtipo: { type: Type.STRING },
+                  descripcion: { type: Type.STRING },
+                  scoreConfiabilidad: { type: Type.NUMBER },
+                },
               },
             },
-            { text: prompt },
-          ],
-        },
-        config: {
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              tipoComprobante: { type: Type.STRING },
-              numeroComprobante: { type: Type.STRING },
-              fechaEmision: { type: Type.STRING },
-              ruc: { type: Type.STRING },
-              razonSocial: { type: Type.STRING },
-              nombreComercial: { type: Type.STRING },
-              subtotal: { type: Type.NUMBER },
-              igv: { type: Type.NUMBER },
-              total: { type: Type.NUMBER },
-              naturaleza: { type: Type.STRING },
-              categoria: { type: Type.STRING },
-              subtipo: { type: Type.STRING },
-              descripcion: { type: Type.STRING },
-              scoreConfiabilidad: { type: Type.NUMBER },
-            },
-          },
-        },
-      });
+          });
+          rawText = (response.text ?? '{}').trim();
+          if (rawText) break;
+        } catch (err) {
+          lastError = err;
+          await new Promise((r) => setTimeout(r, 400));
+        }
+      }
 
-      const rawText = (response.text ?? '{}').trim();
-      const parsed = JSON.parse(rawText) as Record<string, unknown>;
+      if (!rawText) {
+        const msg =
+          lastError instanceof Error ? lastError.message : 'Servicio IA temporalmente ocupado.';
+        res.json({
+          result: null,
+          fallback: 'ocr-local',
+          reason: msg,
+        });
+        return;
+      }
+
+      const cleanJson = rawText
+        .replace(/^```json\s*/i, '')
+        .replace(/^```\s*/i, '')
+        .replace(/```\s*$/i, '')
+        .trim();
+      const parsed = JSON.parse(cleanJson) as Record<string, unknown>;
 
       const validCategory =
         OFFICIAL_CATEGORIES.find(
@@ -181,7 +210,7 @@ ${criteriaSummary}
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Error inesperado al analizar comprobante.';
-      res.status(502).json({ error: msg });
+      res.json({ result: null, fallback: 'ocr-local', reason: msg });
     }
   });
 

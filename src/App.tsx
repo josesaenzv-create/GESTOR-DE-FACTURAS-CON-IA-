@@ -1,5 +1,14 @@
 import { useCallback, useEffect, useState } from 'react';
-import { LogOut, RefreshCw } from 'lucide-react';
+import {
+  LogOut,
+  RefreshCw,
+  Smartphone,
+  Monitor,
+  Camera,
+  Search,
+  BarChart3,
+  Sliders,
+} from 'lucide-react';
 import {
   CREDIBAN_COMPANY,
   type ExpenseCriterion,
@@ -20,8 +29,10 @@ import { ConfigTab } from './components/ConfigTab';
 import { EvidenceModal } from './components/EvidenceModal';
 
 type ActiveTab = 'scanner' | 'search' | 'dashboard' | 'config';
+type ViewMode = 'mobile' | 'pc';
 
 const SESSION_KEY = 'crediban_active_session_v1';
+const VIEW_MODE_KEY = 'crediban_view_mode_v1';
 
 function loadSavedSession(): UserSession | null {
   try {
@@ -33,6 +44,20 @@ function loadSavedSession(): UserSession | null {
     // ignore
   }
   return null;
+}
+
+function getInitialViewMode(): ViewMode {
+  try {
+    const saved = localStorage.getItem(VIEW_MODE_KEY);
+    if (saved === 'mobile' || saved === 'pc') return saved;
+  } catch {
+    // ignore
+  }
+  // Primarily mobile-first by default on narrow viewports, or user-toggleable anytime
+  if (typeof window !== 'undefined' && window.innerWidth < 768) {
+    return 'mobile';
+  }
+  return 'mobile';
 }
 
 export default function App() {
@@ -51,6 +76,7 @@ export default function App() {
   });
 
   const [activeTab, setActiveTab] = useState<ActiveTab>('scanner');
+  const [viewMode, setViewMode] = useState<ViewMode>(getInitialViewMode);
   const [expenses, setExpenses] = useState<ExpenseRecord[]>(SEED_EXPENSES);
   const [criteria, setCriteria] = useState<ExpenseCriterion[]>(DEFAULT_CRITERIA);
   const [sedes, setSedes] = useState<SedeRecord[]>(DEFAULT_SEDES);
@@ -59,6 +85,16 @@ export default function App() {
   const [selectedExpense, setSelectedExpense] = useState<ExpenseRecord | null>(null);
 
   const isManager = isManagerUser(user);
+  const isMobileMode = viewMode === 'mobile';
+
+  const handleSetViewMode = (mode: ViewMode) => {
+    setViewMode(mode);
+    try {
+      localStorage.setItem(VIEW_MODE_KEY, mode);
+    } catch {
+      // ignore
+    }
+  };
 
   const loadBackendData = useCallback(async (session: UserSession) => {
     setSyncing(true);
@@ -140,18 +176,29 @@ export default function App() {
     nuevaNaturaleza: NaturalezaGasto,
     reclasificarHistoricos: boolean,
     categoriaPrincipal: string,
-    subtipo: string
+    subtipo: string,
+    nuevaCategoriaPrincipal?: string
   ) => {
     setCriteria((prev) =>
       prev.map((c) =>
-        c.idCriterio === idCriterio ? { ...c, naturaleza: nuevaNaturaleza } : c
+        c.idCriterio === idCriterio
+          ? {
+              ...c,
+              naturaleza: nuevaNaturaleza,
+              categoriaPrincipal: nuevaCategoriaPrincipal || c.categoriaPrincipal,
+            }
+          : c
       )
     );
     if (reclasificarHistoricos) {
       setExpenses((prev) =>
         prev.map((e) =>
           e.categoriaPrincipal === categoriaPrincipal && e.subtipo === subtipo
-            ? { ...e, naturaleza: nuevaNaturaleza }
+            ? {
+                ...e,
+                naturaleza: nuevaNaturaleza,
+                categoriaPrincipal: nuevaCategoriaPrincipal || e.categoriaPrincipal,
+              }
             : e
         )
       );
@@ -165,76 +212,115 @@ export default function App() {
     ]);
   };
 
+  const handleCriterionRemoved = (idCriterio: string) => {
+    setCriteria((prev) => prev.filter((c) => c.idCriterio !== idCriterio));
+  };
+
   const handleSedeCreated = (sede: SedeRecord) => {
     setSedes((prev) => [...prev.filter((s) => s.nombreSede !== sede.nombreSede), sede]);
   };
 
   return (
     <div className="min-h-screen bg-[#f1f5f9] flex flex-col">
-      {/* Corporate 3-Zone Top Header */}
+      {/* Corporate Header */}
       <header className="bg-[#0f291e] text-white border-b border-emerald-950/60 no-print">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 py-3 flex flex-wrap items-center justify-between gap-4 lg:gap-8">
-          {/* Zone 1: Brand Logo */}
+        <div
+          className={`${
+            isMobileMode ? 'max-w-lg' : 'max-w-7xl'
+          } mx-auto px-4 sm:px-6 py-3 flex items-center justify-between gap-4`}
+        >
           <CredibanLogo variant="header" />
 
-          {/* Zone 2: Single-Line Navigation Tabs */}
-          <nav
-            aria-label="Módulos principales"
-            className="flex items-center gap-1 sm:gap-2 overflow-x-auto"
-          >
-            <button
-              type="button"
-              onClick={() => setActiveTab('scanner')}
-              className={`px-3 py-1.5 text-xs sm:text-sm font-medium rounded-lg whitespace-nowrap shrink-0 transition-colors cursor-pointer ${
-                activeTab === 'scanner'
-                  ? 'bg-[#59B447] text-white'
-                  : 'text-emerald-100 hover:text-white hover:bg-white/10'
-              }`}
+          {/* Desktop Navigation Tabs (Hidden in Mobile Mode) */}
+          {!isMobileMode && (
+            <nav
+              aria-label="Módulos principales"
+              className="hidden md:flex items-center gap-2 overflow-x-auto"
             >
-              1. Escáner IA
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveTab('search')}
-              className={`px-3 py-1.5 text-xs sm:text-sm font-medium rounded-lg whitespace-nowrap shrink-0 transition-colors cursor-pointer ${
-                activeTab === 'search'
-                  ? 'bg-[#59B447] text-white'
-                  : 'text-emerald-100 hover:text-white hover:bg-white/10'
-              }`}
-            >
-              2. Buscador RUC
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveTab('dashboard')}
-              className={`px-3 py-1.5 text-xs sm:text-sm font-medium rounded-lg whitespace-nowrap shrink-0 transition-colors cursor-pointer ${
-                activeTab === 'dashboard'
-                  ? 'bg-[#59B447] text-white'
-                  : 'text-emerald-100 hover:text-white hover:bg-white/10'
-              }`}
-            >
-              3. Dashboard
-            </button>
-            {isManager && (
               <button
                 type="button"
-                onClick={() => setActiveTab('config')}
-                className={`px-3 py-1.5 text-xs sm:text-sm font-medium rounded-lg whitespace-nowrap shrink-0 transition-colors cursor-pointer ${
-                  activeTab === 'config'
+                onClick={() => setActiveTab('scanner')}
+                className={`px-3 py-1.5 text-sm font-medium rounded-lg whitespace-nowrap shrink-0 transition-colors cursor-pointer ${
+                  activeTab === 'scanner'
                     ? 'bg-[#59B447] text-white'
                     : 'text-emerald-100 hover:text-white hover:bg-white/10'
                 }`}
               >
-                4. Criterios y Sedes
+                1. Escáner IA
               </button>
-            )}
-          </nav>
+              <button
+                type="button"
+                onClick={() => setActiveTab('search')}
+                className={`px-3 py-1.5 text-sm font-medium rounded-lg whitespace-nowrap shrink-0 transition-colors cursor-pointer ${
+                  activeTab === 'search'
+                    ? 'bg-[#59B447] text-white'
+                    : 'text-emerald-100 hover:text-white hover:bg-white/10'
+                }`}
+              >
+                2. Buscador RUC
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveTab('dashboard')}
+                className={`px-3 py-1.5 text-sm font-medium rounded-lg whitespace-nowrap shrink-0 transition-colors cursor-pointer ${
+                  activeTab === 'dashboard'
+                    ? 'bg-[#59B447] text-white'
+                    : 'text-emerald-100 hover:text-white hover:bg-white/10'
+                }`}
+              >
+                3. Dashboard
+              </button>
+              {isManager && (
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('config')}
+                  className={`px-3 py-1.5 text-sm font-medium rounded-lg whitespace-nowrap shrink-0 transition-colors cursor-pointer ${
+                    activeTab === 'config'
+                      ? 'bg-[#59B447] text-white'
+                      : 'text-emerald-100 hover:text-white hover:bg-white/10'
+                  }`}
+                >
+                  4. Categorías y Sedes
+                </button>
+              )}
+            </nav>
+          )}
 
-          {/* Zone 3: Account Action */}
-          <div className="flex items-center gap-3 shrink-0">
-            <span className="hidden md:inline text-xs text-emerald-100 whitespace-nowrap">
-              {user.usuario} · {user.sede}
-            </span>
+          {/* View Mode Toggle (Celular / PC) + Logout */}
+          <div className="flex items-center gap-2 shrink-0">
+            <div
+              role="group"
+              aria-label="Modo de visualización"
+              className="flex items-center p-0.5 bg-white/10 rounded-lg"
+            >
+              <button
+                type="button"
+                onClick={() => handleSetViewMode('mobile')}
+                aria-label="Vista Celular"
+                className={`px-2 py-1 text-xs font-medium rounded-md flex items-center gap-1 cursor-pointer transition-colors ${
+                  isMobileMode
+                    ? 'bg-[#59B447] text-white'
+                    : 'text-emerald-100 hover:text-white'
+                }`}
+              >
+                <Smartphone className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">Celular</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => handleSetViewMode('pc')}
+                aria-label="Vista PC"
+                className={`px-2 py-1 text-xs font-medium rounded-md flex items-center gap-1 cursor-pointer transition-colors ${
+                  !isMobileMode
+                    ? 'bg-[#59B447] text-white'
+                    : 'text-emerald-100 hover:text-white'
+                }`}
+              >
+                <Monitor className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">PC</span>
+              </button>
+            </div>
+
             <button
               type="button"
               onClick={handleLogout}
@@ -249,14 +335,18 @@ export default function App() {
 
       {/* Workspace Sub-Toolbar */}
       <div className="bg-white border-b border-slate-200 no-print">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-600">
+        <div
+          className={`${
+            isMobileMode ? 'max-w-lg' : 'max-w-7xl'
+          } mx-auto px-4 sm:px-6 py-2 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-600`}
+        >
           <div className="flex items-center gap-2 flex-wrap">
             <span className="font-semibold text-slate-900">{CREDIBAN_COMPANY.nombre}</span>
             <span aria-hidden="true">·</span>
             <span className="font-mono">RUC {CREDIBAN_COMPANY.ruc}</span>
             <span aria-hidden="true">·</span>
             <span>
-              Perfil: <strong className="text-slate-800">{user.cargo}</strong> ({user.sede})
+              <strong className="text-slate-800">{user.sede}</strong>
             </span>
           </div>
 
@@ -269,29 +359,35 @@ export default function App() {
             <RefreshCw className={`w-3.5 h-3.5 ${syncing ? 'animate-spin' : ''}`} />
             <span>
               {syncing
-                ? 'Sincronizando Apps Script...'
+                ? 'Sincronizando con Servidor...'
                 : syncSource === 'live'
-                ? 'Sincronizado con Google Sheets'
-                : 'Sincronizar con Sheets'}
+                ? 'Sincronizado con Servidor'
+                : 'Sincronizar con Servidor'}
             </span>
           </button>
         </div>
       </div>
 
       {/* Main Content */}
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 py-6">
+      <main
+        className={`flex-1 w-full mx-auto px-3 sm:px-6 py-4 sm:py-6 ${
+          isMobileMode ? 'max-w-lg pb-24' : 'max-w-7xl pb-24 md:pb-8'
+        }`}
+      >
         {activeTab === 'scanner' && (
           <ScannerTab
             user={user}
             sedes={sedes}
             criteria={criteria}
             existingExpenses={visibleExpenses}
+            isMobileMode={isMobileMode}
             onExpenseCreated={handleExpenseCreated}
           />
         )}
         {activeTab === 'search' && (
           <SearchTab
             expenses={visibleExpenses}
+            isMobileMode={isMobileMode}
             onSelectExpense={setSelectedExpense}
             onImportCsvRecords={handleImportCsvRecords}
           />
@@ -308,13 +404,72 @@ export default function App() {
           <ConfigTab
             user={user}
             criteria={criteria}
+            expenses={visibleExpenses}
             sedes={sedes}
             onCriterionMoved={handleCriterionMoved}
             onCriterionSaved={handleCriterionSaved}
+            onCriterionRemoved={handleCriterionRemoved}
             onSedeCreated={handleSedeCreated}
           />
         )}
       </main>
+
+      {/* Bottom Sticky Thumb Navigation (Always active in Mobile Mode, and on narrow screens in PC mode) */}
+      <nav
+        aria-label="Navegación móvil"
+        className={`fixed bottom-0 inset-x-0 z-40 bg-white border-t border-slate-200 no-print ${
+          isMobileMode ? 'block' : 'md:hidden'
+        }`}
+      >
+        <div
+          className={`${
+            isMobileMode ? 'max-w-lg mx-auto' : ''
+          } grid ${isManager ? 'grid-cols-4' : 'grid-cols-3'} h-16`}
+        >
+          <button
+            type="button"
+            onClick={() => setActiveTab('scanner')}
+            className={`flex flex-col items-center justify-center gap-1 text-[11px] font-semibold cursor-pointer ${
+              activeTab === 'scanner' ? 'text-[#1B4332] bg-emerald-50/70' : 'text-slate-500'
+            }`}
+          >
+            <Camera className="w-4 h-4" />
+            <span>Escáner</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab('search')}
+            className={`flex flex-col items-center justify-center gap-1 text-[11px] font-semibold cursor-pointer ${
+              activeTab === 'search' ? 'text-[#1B4332] bg-emerald-50/70' : 'text-slate-500'
+            }`}
+          >
+            <Search className="w-4 h-4" />
+            <span>Buscador</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab('dashboard')}
+            className={`flex flex-col items-center justify-center gap-1 text-[11px] font-semibold cursor-pointer ${
+              activeTab === 'dashboard' ? 'text-[#1B4332] bg-emerald-50/70' : 'text-slate-500'
+            }`}
+          >
+            <BarChart3 className="w-4 h-4" />
+            <span>Dashboard</span>
+          </button>
+          {isManager && (
+            <button
+              type="button"
+              onClick={() => setActiveTab('config')}
+              className={`flex flex-col items-center justify-center gap-1 text-[11px] font-semibold cursor-pointer ${
+                activeTab === 'config' ? 'text-[#1B4332] bg-emerald-50/70' : 'text-slate-500'
+              }`}
+            >
+              <Sliders className="w-4 h-4" />
+              <span>Categorías</span>
+            </button>
+          )}
+        </div>
+      </nav>
 
       {selectedExpense && (
         <EvidenceModal

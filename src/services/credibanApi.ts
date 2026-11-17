@@ -22,6 +22,7 @@ import {
   getYearFromIsoDate,
   parseCommaDecimal,
 } from '../utils/accounting';
+import { parsePeruReceiptText } from '../utils/ocrParser';
 
 export interface BackendBundle {
   expenses: ExpenseRecord[];
@@ -512,12 +513,12 @@ export async function saveExpenseToBackend(
       if (res.idRegistro || res.id) {
         updatedRecord.id = String(res.idRegistro || res.id);
       }
-      msg = 'Comprobante guardado en Google Sheets y Drive HD.';
+      msg = 'Comprobante guardado en el Servidor y Nube HD.';
     } else {
-      msg = String(res?.message || 'Guardado localmente; pendiente sincronización en nube.');
+      msg = String(res?.message || 'Guardado localmente; pendiente sincronización con Servidor.');
     }
   } catch {
-    msg = 'Sin respuesta del servidor Apps Script; guardado en caché local.';
+    msg = 'Sin respuesta del Servidor; guardado en caché local.';
   }
 
   const current = readCache<ExpenseRecord[]>(LOCAL_CACHE_KEYS.expenses, SEED_EXPENSES);
@@ -553,7 +554,7 @@ export async function updateExpenseInBackend(
     });
     if (res && res.status !== 'error') {
       synced = true;
-      msg = 'Comprobante actualizado en Google Sheets.';
+      msg = 'Comprobante actualizado en el Servidor.';
     }
   } catch {
     // Local cache fallback
@@ -582,7 +583,7 @@ export async function deleteExpenseInBackend(
     });
     if (res && res.status !== 'error') {
       synced = true;
-      msg = 'Comprobante eliminado en Google Sheets.';
+      msg = 'Comprobante eliminado del Servidor.';
     }
   } catch {
     // Local cache fallback
@@ -627,20 +628,28 @@ export async function saveCriterionInBackend(
   usuario: string
 ): Promise<{ ok: boolean; syncedToCloud: boolean; message: string }> {
   let synced = false;
-  let msg = 'Criterio guardado localmente.';
+  let msg = 'Criterio actualizado localmente.';
   try {
     const res = await postToDataApi<Record<string, unknown>>({
       action: 'guardarCriterioGasto',
       ...criterion,
+      palabrasClave: criterion.palabrasClaveIA,
+      aplicaIgv: criterion.aplicaIgvDefecto,
+      topeAlerta: criterion.topeAlertaSoles,
       modificadoPor: usuario,
     });
     if (res && res.status !== 'error') {
       synced = true;
-      msg = 'Criterio guardado en PARAMETROS_GASTOS.';
+      msg = 'Criterio guardado en el Servidor.';
     }
   } catch {
     // Local update continues
   }
+
+  const current = readCache<ExpenseCriterion[]>(LOCAL_CACHE_KEYS.criteria, DEFAULT_CRITERIA);
+  const next = [criterion, ...current.filter((c) => c.idCriterio !== criterion.idCriterio)];
+  writeCache(LOCAL_CACHE_KEYS.criteria, next);
+
   return { ok: true, syncedToCloud: synced, message: msg };
 }
 
@@ -661,7 +670,7 @@ export async function createSedeInBackend(
     });
     if (res && res.status !== 'error') {
       synced = true;
-      msg = `Sede ${sede.nombreSede}, hoja SEDE_${sede.nombreSede} y carpeta Drive creadas.`;
+      msg = `Sede ${sede.nombreSede} y carpeta en la Nube creadas en el Servidor.`;
     }
   } catch {
     // Local update continues
@@ -671,18 +680,50 @@ export async function createSedeInBackend(
 
 export async function scanInvoiceWithGeminiApi(params: {
   imageBase64: string;
+  imageDataUrl?: string;
   mimeType: string;
   criteria: ExpenseCriterion[];
-}): Promise<AiScanResult> {
-  const res = await fetch('/api/scan-invoice', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(params),
-  });
+}): Promise<{ result: AiScanResult; engine: 'gemini' | 'ocr-local' }> {
+  // 1. Try server-side Gemini Vision API first (safely checking JSON content-type to avoid <!doctype errors)
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 16000);
+    const res = await fetch('/api/scan-invoice', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        imageBase64: params.imageBase64,
+        mimeType: params.mimeType,
+        criteria: params.criteria,
+      }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
 
-  const data = await res.json();
-  if (!res.ok) {
-    throw new Error(data?.error || 'Error al analizar el comprobante con Gemini Vision.');
+    const contentType = res.headers.get('content-type') || '';
+    if (res.ok && contentType.includes('application/json')) {
+      const data = await res.json();
+      if (data?.result) {
+        return { result: data.result as AiScanResult, engine: 'gemini' };
+      }
+    }
+  } catch {
+    // Server route unavailable (e.g. GitHub Pages static deploy) -> use free local OCR below
   }
-  return data.result as AiScanResult;
+
+  // 2. Free zero-API-key client-side OCR fallback using Tesseract.js
+  const { createWorker } = await import('tesseract.js');
+  const dataUrl =
+    params.imageDataUrl || `data:${params.mimeType || 'image/jpeg'};base64,${params.imageBase64}`;
+
+  const worker = await createWorker('spa+eng');
+  try {
+    const {
+      data: { text },
+    } = await worker.recognize(dataUrl);
+    const parsed = parsePeruReceiptText(text || '', params.criteria);
+    return { result: parsed, engine: 'ocr-local' };
+  } finally {
+    await worker.terminate();
+  }
 }

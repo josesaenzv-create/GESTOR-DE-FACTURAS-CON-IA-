@@ -1,7 +1,6 @@
 import React, { useState } from 'react';
 import {
   X,
-  MapPin,
   ExternalLink,
   Pencil,
   Trash2,
@@ -46,7 +45,6 @@ export const EvidenceModal: React.FC<EvidenceModalProps> = ({
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [busy, setBusy] = useState(false);
 
-  // Editable fields
   const [razonSocial, setRazonSocial] = useState(record.razonSocial);
   const [nombreComercial, setNombreComercial] = useState(record.nombreComercial);
   const [ruc, setRuc] = useState(record.ruc);
@@ -55,7 +53,6 @@ export const EvidenceModal: React.FC<EvidenceModalProps> = ({
   const [totalStr, setTotalStr] = useState(record.total.toFixed(2));
   const [naturaleza, setNaturaleza] = useState<NaturalezaGasto>(record.naturaleza);
   const [descripcion, setDescripcion] = useState(record.descripcion);
-  const [direccionGps, setDireccionGps] = useState(record.direccionGps);
 
   const handleSaveEdit = async () => {
     const numTotal = parseFloat(totalStr) || 0;
@@ -76,7 +73,6 @@ export const EvidenceModal: React.FC<EvidenceModalProps> = ({
         nivelImpacto: getImpactLevel(breakdown.total),
         naturaleza,
         descripcion: descripcion.trim(),
-        direccionGps: direccionGps.trim(),
       };
       await updateExpenseInBackend(next, user);
       onUpdated(next);
@@ -104,11 +100,11 @@ export const EvidenceModal: React.FC<EvidenceModalProps> = ({
       role="dialog"
       aria-modal="true"
       aria-label={`Detalle de comprobante ${record.numeroComprobante || record.id}`}
-      className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-[2px] flex items-center justify-center p-4"
+      className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-[2px] flex items-center justify-center p-3 sm:p-4"
     >
       <div className="bg-white rounded-2xl border border-slate-200 w-full max-w-5xl max-h-[92vh] overflow-hidden flex flex-col">
         {/* Modal Header */}
-        <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between gap-4 bg-slate-50">
+        <div className="px-4 sm:px-6 py-4 border-b border-slate-200 flex items-center justify-between gap-4 bg-slate-50">
           <div className="flex items-center gap-4 min-w-0">
             <div className="hidden sm:block">
               <CredibanLogo variant="print" />
@@ -130,7 +126,7 @@ export const EvidenceModal: React.FC<EvidenceModalProps> = ({
               className="px-3 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-300 hover:bg-slate-50 rounded-lg flex items-center gap-1.5 cursor-pointer"
             >
               <Printer className="w-3.5 h-3.5" />
-              <span>Imprimir</span>
+              <span className="hidden sm:inline">Imprimir</span>
             </button>
             <button
               type="button"
@@ -146,7 +142,7 @@ export const EvidenceModal: React.FC<EvidenceModalProps> = ({
         {/* Split Content */}
         <div className="flex-1 overflow-y-auto grid grid-cols-1 lg:grid-cols-12">
           {/* Left: High Resolution Invoice Photo */}
-          <div className="lg:col-span-6 bg-slate-900/5 border-b lg:border-b-0 lg:border-r border-slate-200 p-5 flex flex-col items-center justify-center min-h-[320px]">
+          <div className="lg:col-span-6 bg-slate-900/5 border-b lg:border-b-0 lg:border-r border-slate-200 p-5 flex flex-col items-center justify-center min-h-[260px]">
             {photoUrl && !imgFailed ? (
               <div className="w-full flex flex-col items-center gap-3">
                 <img
@@ -154,7 +150,7 @@ export const EvidenceModal: React.FC<EvidenceModalProps> = ({
                   alt={`Comprobante ${record.numeroComprobante}`}
                   referrerPolicy="no-referrer"
                   onError={() => setImgFailed(true)}
-                  className="w-full max-h-[60vh] object-contain rounded-lg border border-slate-200 bg-white"
+                  className="w-full max-h-[55vh] object-contain rounded-lg border border-slate-200 bg-white"
                 />
                 {record.linkFotoView && (
                   <a
@@ -163,13 +159,13 @@ export const EvidenceModal: React.FC<EvidenceModalProps> = ({
                     rel="noreferrer"
                     className="text-xs font-medium text-[#1B4332] hover:text-[#59B447] flex items-center gap-1"
                   >
-                    <span>Ver original en Google Drive HD</span>
+                    <span>Ver original en Nube HD</span>
                     <ExternalLink className="w-3.5 h-3.5" />
                   </a>
                 )}
               </div>
             ) : (
-              <div className="text-center p-8 max-w-xs">
+              <div className="text-center p-6 max-w-xs">
                 <div className="w-12 h-12 rounded-xl bg-slate-200/80 text-slate-500 flex items-center justify-center mx-auto mb-3">
                   <FileImage className="w-6 h-6" />
                 </div>
@@ -177,14 +173,14 @@ export const EvidenceModal: React.FC<EvidenceModalProps> = ({
                   Sin imagen adjunta disponible
                 </p>
                 <p className="text-xs text-slate-500 mt-1">
-                  Este registro corresponde a un asiento contable o su fotografía está archivada en Google Drive de la sede {record.sede}.
+                  Este registro corresponde a un asiento contable o su fotografía está archivada en el Servidor de la sede {record.sede}.
                 </p>
               </div>
             )}
           </div>
 
-          {/* Right: Accounting & GPS Details */}
-          <div className="lg:col-span-6 p-6 space-y-5">
+          {/* Right: Accounting Details */}
+          <div className="lg:col-span-6 p-5 sm:p-6 space-y-5">
             {editing ? (
               <div className="space-y-3">
                 <h4 className="text-sm font-bold text-slate-900">Editar Registro Contable</h4>
@@ -195,7 +191,7 @@ export const EvidenceModal: React.FC<EvidenceModalProps> = ({
                       type="text"
                       value={ruc}
                       onChange={(e) => setRuc(e.target.value)}
-                      className="w-full px-3 py-1.5 text-sm font-mono border border-slate-300 rounded-lg"
+                      className="w-full px-3 py-2 text-sm font-mono border border-slate-300 rounded-lg"
                     />
                   </div>
                   <div>
@@ -204,7 +200,7 @@ export const EvidenceModal: React.FC<EvidenceModalProps> = ({
                       type="text"
                       value={numeroComprobante}
                       onChange={(e) => setNumeroComprobante(e.target.value)}
-                      className="w-full px-3 py-1.5 text-sm font-mono border border-slate-300 rounded-lg"
+                      className="w-full px-3 py-2 text-sm font-mono border border-slate-300 rounded-lg"
                     />
                   </div>
                 </div>
@@ -214,7 +210,7 @@ export const EvidenceModal: React.FC<EvidenceModalProps> = ({
                     type="text"
                     value={razonSocial}
                     onChange={(e) => setRazonSocial(e.target.value)}
-                    className="w-full px-3 py-1.5 text-sm border border-slate-300 rounded-lg"
+                    className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg"
                   />
                 </div>
                 <div>
@@ -223,7 +219,7 @@ export const EvidenceModal: React.FC<EvidenceModalProps> = ({
                     type="text"
                     value={nombreComercial}
                     onChange={(e) => setNombreComercial(e.target.value)}
-                    className="w-full px-3 py-1.5 text-sm border border-slate-300 rounded-lg"
+                    className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg"
                   />
                 </div>
                 <div className="grid grid-cols-3 gap-3">
@@ -232,7 +228,7 @@ export const EvidenceModal: React.FC<EvidenceModalProps> = ({
                     <select
                       value={tipoComprobante}
                       onChange={(e) => setTipoComprobante(e.target.value as TipoComprobante)}
-                      className="w-full px-2 py-1.5 text-xs border border-slate-300 rounded-lg"
+                      className="w-full px-2 py-2 text-xs border border-slate-300 rounded-lg"
                     >
                       <option value="FACTURA">FACTURA</option>
                       <option value="BOLETA">BOLETA</option>
@@ -245,7 +241,7 @@ export const EvidenceModal: React.FC<EvidenceModalProps> = ({
                     <select
                       value={naturaleza}
                       onChange={(e) => setNaturaleza(e.target.value as NaturalezaGasto)}
-                      className="w-full px-2 py-1.5 text-xs border border-slate-300 rounded-lg"
+                      className="w-full px-2 py-2 text-xs border border-slate-300 rounded-lg"
                     >
                       <option value="Costo Fijo">Costo Fijo</option>
                       <option value="Costo Variable">Costo Variable</option>
@@ -258,18 +254,9 @@ export const EvidenceModal: React.FC<EvidenceModalProps> = ({
                       step="0.01"
                       value={totalStr}
                       onChange={(e) => setTotalStr(e.target.value)}
-                      className="w-full px-2 py-1.5 text-sm font-mono font-bold border border-slate-300 rounded-lg"
+                      className="w-full px-2 py-2 text-sm font-mono font-bold border border-slate-300 rounded-lg"
                     />
                   </div>
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-slate-600 mb-1">Dirección GPS</label>
-                  <input
-                    type="text"
-                    value={direccionGps}
-                    onChange={(e) => setDireccionGps(e.target.value)}
-                    className="w-full px-3 py-1.5 text-xs border border-slate-300 rounded-lg"
-                  />
                 </div>
                 <div>
                   <label className="block text-xs font-medium text-slate-600 mb-1">Descripción</label>
@@ -277,7 +264,7 @@ export const EvidenceModal: React.FC<EvidenceModalProps> = ({
                     rows={2}
                     value={descripcion}
                     onChange={(e) => setDescripcion(e.target.value)}
-                    className="w-full px-3 py-1.5 text-xs border border-slate-300 rounded-lg"
+                    className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
                   />
                 </div>
                 <div className="flex items-center gap-2 pt-2">
@@ -363,33 +350,12 @@ export const EvidenceModal: React.FC<EvidenceModalProps> = ({
                       {record.descripcion || 'Sin descripción adicional.'}
                     </dd>
                   </div>
-                  <div className="sm:col-span-2 pt-2 border-t border-slate-200">
-                    <dt className="text-slate-500 flex items-center gap-1">
-                      <MapPin className="w-3.5 h-3.5 text-[#59B447]" />
-                      <span>Ubicación GPS de Emisión / Compra</span>
-                    </dt>
-                    <dd className="text-slate-900 font-medium mt-1 flex flex-wrap items-center justify-between gap-2">
-                      <span>{record.direccionGps || 'Sin dirección registrada'}</span>
-                      {record.linkMapa && (
-                        <a
-                          href={record.linkMapa}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="text-[#1B4332] hover:text-[#59B447] font-semibold flex items-center gap-1"
-                        >
-                          <span>Trazar ruta en Maps</span>
-                          <ExternalLink className="w-3 h-3" />
-                        </a>
-                      )}
-                    </dd>
-                  </div>
-                  <div className="sm:col-span-2 text-slate-500">
+                  <div className="sm:col-span-2 pt-2 border-t border-slate-200 text-slate-500">
                     Registrado por <strong className="text-slate-800">{record.responsable}</strong>{' '}
                     ({record.cargoUsuario || 'Personal'})
                   </div>
                 </dl>
 
-                {/* Actions */}
                 <div className="pt-4 border-t border-slate-200 flex flex-wrap items-center justify-between gap-3 no-print">
                   <button
                     type="button"

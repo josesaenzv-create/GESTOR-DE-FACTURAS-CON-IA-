@@ -4,7 +4,6 @@ import {
   Download,
   Upload,
   Eye,
-  MapPin,
   X,
   Building2,
 } from 'lucide-react';
@@ -20,12 +19,14 @@ import {
 
 interface SearchTabProps {
   expenses: ExpenseRecord[];
+  isMobileMode?: boolean;
   onSelectExpense: (record: ExpenseRecord) => void;
   onImportCsvRecords: (records: ExpenseRecord[]) => void;
 }
 
 export const SearchTab: React.FC<SearchTabProps> = ({
   expenses,
+  isMobileMode = false,
   onSelectExpense,
   onImportCsvRecords,
 }) => {
@@ -42,11 +43,6 @@ export const SearchTab: React.FC<SearchTabProps> = ({
 
   const providerSummary = useMemo(() => {
     if (!query.trim() || filtered.length === 0) return null;
-    // Show executive summary when filtered records share a provider or search targets a specific provider
-    const uniqueRucs = new Set(filtered.map((r) => r.ruc || r.razonSocial));
-    if (uniqueRucs.size <= 2) {
-      return computeProviderSummary(filtered);
-    }
     return computeProviderSummary(filtered);
   }, [query, filtered]);
 
@@ -83,16 +79,16 @@ export const SearchTab: React.FC<SearchTabProps> = ({
   };
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-4 sm:space-y-5">
       {/* Search Header + CSV Backup Controls */}
-      <div className="bg-white rounded-xl border border-slate-200 p-5 space-y-4">
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+      <div className="bg-white rounded-xl border border-slate-200 p-4 sm:p-5 space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div>
             <h2 className="text-base font-bold text-slate-900">
-              Buscador Inteligente de Proveedores y Comprobantes
+              Buscador de Proveedores y Comprobantes
             </h2>
             <p className="text-xs text-slate-500 mt-0.5">
-              Busca por RUC/DNI, Razón Social, Nombre Comercial, N° Comprobante (ej. 458 encuentra F004-000458), responsable o concepto.
+              Busca por RUC/DNI, Razón Social, Nombre Comercial o N° Comprobante (ej. 458).
             </p>
           </div>
           <div className="flex items-center gap-2 shrink-0">
@@ -106,7 +102,7 @@ export const SearchTab: React.FC<SearchTabProps> = ({
             <button
               type="button"
               onClick={() => csvInputRef.current?.click()}
-              className="px-3.5 py-2 text-xs font-medium text-slate-700 bg-white border border-slate-300 hover:bg-slate-50 rounded-lg flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
+              className="px-3 py-2 text-xs font-medium text-slate-700 bg-white border border-slate-300 hover:bg-slate-50 rounded-lg flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
             >
               <Upload className="w-3.5 h-3.5" />
               <span>Restaurar CSV</span>
@@ -114,10 +110,10 @@ export const SearchTab: React.FC<SearchTabProps> = ({
             <button
               type="button"
               onClick={handleExportCsv}
-              className="px-3.5 py-2 text-xs font-semibold text-white bg-[#1B4332] hover:bg-[#0f291e] rounded-lg flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
+              className="px-3 py-2 text-xs font-semibold text-white bg-[#1B4332] hover:bg-[#0f291e] rounded-lg flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
             >
               <Download className="w-3.5 h-3.5" />
-              <span>Exportar Excel (CSV)</span>
+              <span>Exportar CSV</span>
             </button>
           </div>
         </div>
@@ -130,7 +126,7 @@ export const SearchTab: React.FC<SearchTabProps> = ({
             aria-label="Buscar por RUC, razón social, nombre comercial o comprobante"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Escribe RUC, Razón Social, Nombre Comercial, N° Serie/Correlativo (ej. 458), o concepto..."
+            placeholder="RUC, Razón Social, Nombre Comercial, Serie/Correlativo (ej. 458)..."
             className="w-full pl-10 pr-10 py-2.5 text-sm bg-slate-50 border border-slate-300 rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#59B447]/30 focus:border-[#59B447]"
           />
           {query && (
@@ -149,7 +145,7 @@ export const SearchTab: React.FC<SearchTabProps> = ({
         {providerChips.length > 0 && (
           <div>
             <p className="text-xs font-medium text-slate-500 mb-2">
-              Directorio rápido de proveedores frecuentes:
+              Proveedores frecuentes:
             </p>
             <div className="flex flex-wrap gap-2">
               {providerChips.map((chip) => {
@@ -168,7 +164,7 @@ export const SearchTab: React.FC<SearchTabProps> = ({
                         : 'bg-slate-50 hover:bg-slate-100 text-slate-700 border-slate-200'
                     }`}
                   >
-                    <span className="font-semibold truncate max-w-[160px]">
+                    <span className="font-semibold truncate max-w-[150px]">
                       {chip.nombreComercial}
                     </span>
                     <span className="font-mono tabular-nums opacity-75">
@@ -190,46 +186,44 @@ export const SearchTab: React.FC<SearchTabProps> = ({
 
       {/* Consolidated Provider Executive Summary */}
       {providerSummary && (
-        <div className="bg-white rounded-xl border border-slate-200 p-5">
-          <div className="flex flex-wrap items-start justify-between gap-4 pb-4 border-b border-slate-200">
-            <div className="flex items-start gap-3">
-              <div className="w-10 h-10 rounded-lg bg-[#59B447]/15 text-[#1B4332] flex items-center justify-center shrink-0">
-                <Building2 className="w-5 h-5" />
-              </div>
-              <div>
-                <h3 className="text-sm font-bold text-slate-900">
-                  Ficha Consolidada: {providerSummary.razonSocial}
-                </h3>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  Comercial: {providerSummary.nombreComercial} · RUC:{' '}
-                  <span className="font-mono font-medium">{providerSummary.ruc}</span> · Sedes:{' '}
-                  {providerSummary.sedes.join(', ')}
-                </p>
-              </div>
+        <div className="bg-white rounded-xl border border-slate-200 p-4 sm:p-5">
+          <div className="flex items-start gap-3 pb-4 border-b border-slate-200">
+            <div className="w-10 h-10 rounded-lg bg-[#59B447]/15 text-[#1B4332] flex items-center justify-center shrink-0">
+              <Building2 className="w-5 h-5" />
+            </div>
+            <div className="min-w-0">
+              <h3 className="text-sm font-bold text-slate-900 truncate">
+                Ficha Consolidada: {providerSummary.razonSocial}
+              </h3>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Comercial: {providerSummary.nombreComercial} · RUC:{' '}
+                <span className="font-mono font-medium">{providerSummary.ruc}</span> · Sedes:{' '}
+                {providerSummary.sedes.join(', ')}
+              </p>
             </div>
           </div>
 
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4 pt-4">
             <div>
-              <p className="text-xs text-slate-500">Total Comprobantes</p>
+              <p className="text-xs text-slate-500">Comprobantes</p>
               <p className="text-lg font-bold font-mono tabular-nums text-slate-900 mt-0.5">
                 {providerSummary.totalComprobantes}
               </p>
             </div>
             <div>
-              <p className="text-xs text-slate-500">Subtotal Acumulado</p>
+              <p className="text-xs text-slate-500">Subtotal</p>
               <p className="text-lg font-bold font-mono tabular-nums text-slate-900 mt-0.5">
                 {formatCurrencySoles(providerSummary.subtotalAcumulado)}
               </p>
             </div>
             <div>
-              <p className="text-xs text-slate-500">IGV Acumulado</p>
+              <p className="text-xs text-slate-500">IGV</p>
               <p className="text-lg font-bold font-mono tabular-nums text-slate-900 mt-0.5">
                 {formatCurrencySoles(providerSummary.igvAcumulado)}
               </p>
             </div>
             <div>
-              <p className="text-xs text-slate-500">Total Facturado (S/)</p>
+              <p className="text-xs text-slate-500">Total Facturado</p>
               <p className="text-lg font-extrabold font-mono tabular-nums text-[#1B4332] mt-0.5">
                 {formatCurrencySoles(providerSummary.totalAcumulado)}
               </p>
@@ -238,9 +232,9 @@ export const SearchTab: React.FC<SearchTabProps> = ({
         </div>
       )}
 
-      {/* Results Data Grid */}
+      {/* Results: Mobile Cards when in Mobile Mode / small screens, Table on PC */}
       <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
-        <div className="px-5 py-3.5 border-b border-slate-200 flex items-center justify-between">
+        <div className="px-4 sm:px-5 py-3.5 border-b border-slate-200 flex items-center justify-between">
           <h3 className="text-sm font-bold text-slate-900">
             Comprobantes Encontrados
           </h3>
@@ -250,13 +244,43 @@ export const SearchTab: React.FC<SearchTabProps> = ({
         </div>
 
         {filtered.length === 0 ? (
-          <div className="p-10 text-center">
+          <div className="p-8 text-center">
             <p className="text-sm font-medium text-slate-700">
               No se encontraron comprobantes para &ldquo;{query}&rdquo;.
             </p>
-            <p className="text-xs text-slate-500 mt-1">
-              Prueba buscando por número correlativo, RUC o limpia el filtro.
-            </p>
+          </div>
+        ) : isMobileMode ? (
+          <div className="divide-y divide-slate-200">
+            {filtered.map((r) => (
+              <div key={r.id} className="p-4 space-y-2">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="text-sm font-bold text-slate-900 truncate">
+                      {r.razonSocial || r.nombreComercial}
+                    </p>
+                    <p className="text-xs text-slate-500 font-mono">
+                      {r.fecha} · {r.numeroComprobante || 'S/N'} · {r.sede}
+                    </p>
+                  </div>
+                  <span className="text-sm font-extrabold font-mono tabular-nums text-[#1B4332] shrink-0">
+                    {formatCurrencySoles(r.total)}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between gap-2 pt-1">
+                  <span className="text-xs text-slate-600 truncate">
+                    {r.naturaleza} · {r.subtipo}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => onSelectExpense(r)}
+                    className="px-3 py-1.5 text-xs font-semibold text-[#1B4332] bg-emerald-50 hover:bg-emerald-100 rounded-lg inline-flex items-center gap-1 cursor-pointer shrink-0"
+                  >
+                    <Eye className="w-3.5 h-3.5" />
+                    <span>Ver</span>
+                  </button>
+                </div>
+              </div>
+            ))}
           </div>
         ) : (
           <div className="overflow-x-auto">
@@ -270,7 +294,7 @@ export const SearchTab: React.FC<SearchTabProps> = ({
                   <th className="py-2.5 px-4 text-right">Subtotal</th>
                   <th className="py-2.5 px-4 text-right">IGV</th>
                   <th className="py-2.5 px-4 text-right">Total (S/)</th>
-                  <th className="py-2.5 px-4 text-right">Acciones</th>
+                  <th className="py-2.5 px-4 text-right">Acción</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-200 text-xs">
@@ -310,27 +334,14 @@ export const SearchTab: React.FC<SearchTabProps> = ({
                       {r.total.toFixed(2)}
                     </td>
                     <td className="py-2.5 px-4 text-right whitespace-nowrap">
-                      <div className="inline-flex items-center gap-1.5">
-                        {r.linkMapa && (
-                          <a
-                            href={r.linkMapa}
-                            target="_blank"
-                            rel="noreferrer"
-                            aria-label={`Ver mapa GPS de ${r.numeroComprobante || r.id}`}
-                            className="p-1.5 text-slate-500 hover:text-[#1B4332] hover:bg-slate-100 rounded-md"
-                          >
-                            <MapPin className="w-3.5 h-3.5" />
-                          </a>
-                        )}
-                        <button
-                          type="button"
-                          onClick={() => onSelectExpense(r)}
-                          className="px-2.5 py-1 text-xs font-medium text-[#1B4332] bg-emerald-50 hover:bg-emerald-100 rounded-md inline-flex items-center gap-1 cursor-pointer"
-                        >
-                          <Eye className="w-3.5 h-3.5" />
-                          <span>Ver</span>
-                        </button>
-                      </div>
+                      <button
+                        type="button"
+                        onClick={() => onSelectExpense(r)}
+                        className="px-2.5 py-1 text-xs font-medium text-[#1B4332] bg-emerald-50 hover:bg-emerald-100 rounded-md inline-flex items-center gap-1 cursor-pointer"
+                      >
+                        <Eye className="w-3.5 h-3.5" />
+                        <span>Ver</span>
+                      </button>
                     </td>
                   </tr>
                 ))}
