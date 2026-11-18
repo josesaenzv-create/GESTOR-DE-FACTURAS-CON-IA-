@@ -872,6 +872,13 @@ async function callGeminiEndpoint(
     [404, 429, 500, 502, 503, 504].includes(attempt.response.status)
   ) {
     attempt = await postToGeminiUrl(GEMINI_FALLBACK_ENDPOINT, apiKey, payload, timeoutMs);
+    if (
+      !attempt.response.ok &&
+      [429, 500, 502, 503, 504].includes(attempt.response.status)
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 1200));
+      attempt = await postToGeminiUrl(GEMINI_ENDPOINT, apiKey, payload, timeoutMs);
+    }
   }
 
   const { response, rawText, data } = attempt;
