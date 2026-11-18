@@ -233,37 +233,79 @@ export async function processEditedInvoiceImage(
 }
 
 /**
- * Normalizes EXIF camera orientation from mobile phones into an upright data URL
- * using createImageBitmap (which respects EXIF 'from-image' orientation without double-rotating),
- * falling back cleanly to FileReader if unavailable.
+ * Normalizes EXIF camera orientation from mobile phones or gallery images into an upright JPEG data URL:
+ * 1. Tries createImageBitmap (fast, respects EXIF 'from-image' orientation without double rotation)
+ * 2. Falls back to URL.createObjectURL + <img> -> canvas (avoids giant base64 FileReader memory spikes and missing MIME issues)
+ * 3. Final fallback to FileReader data URL
  */
 async function normalizeExifFileToDataUrl(file: File): Promise<string> {
+  if (!file || file.size === 0) {
+    throw new Error('El archivo seleccionado está vacío o no es válido.');
+  }
+
+  const drawSourceToJpegDataUrl = (
+    source: CanvasImageSource,
+    srcW: number,
+    srcH: number
+  ): string | null => {
+    if (!srcW || !srcH || typeof document === 'undefined') return null;
+    const maxInitial = 2800;
+    const ratio = Math.min(1, maxInitial / Math.max(srcW, srcH));
+    const w = Math.max(1, Math.round(srcW * ratio));
+    const h = Math.max(1, Math.round(srcH * ratio));
+    const canvas = document.createElement('canvas');
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, w, h);
+    ctx.drawImage(source, 0, 0, w, h);
+    return canvas.toDataURL('image/jpeg', 0.95);
+  };
+
   if (typeof createImageBitmap === 'function' && typeof document !== 'undefined') {
     try {
       const bitmap = await createImageBitmap(file);
-      const maxInitial = 2800;
-      const ratio = Math.min(1, maxInitial / Math.max(bitmap.width, bitmap.height));
-      const w = Math.max(1, Math.round(bitmap.width * ratio));
-      const h = Math.max(1, Math.round(bitmap.height * ratio));
-      const canvas = document.createElement('canvas');
-      canvas.width = w;
-      canvas.height = h;
-      const ctx = canvas.getContext('2d');
-      if (ctx) {
-        ctx.imageSmoothingEnabled = true;
-        ctx.imageSmoothingQuality = 'high';
-        ctx.fillStyle = '#ffffff';
-        ctx.fillRect(0, 0, w, h);
-        ctx.drawImage(bitmap, 0, 0, w, h);
+      try {
+        const result = drawSourceToJpegDataUrl(bitmap, bitmap.width, bitmap.height);
+        if (result) return result;
+      } finally {
         bitmap.close?.();
-        return canvas.toDataURL('image/jpeg', 0.95);
       }
-      bitmap.close?.();
     } catch {
-      // Fallback to standard FileReader below
+      // Fallback to ObjectURL below
     }
   }
-  return readFileAsDataUrl(file);
+
+  if (typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function') {
+    const objectUrl = URL.createObjectURL(file);
+    try {
+      const img = await loadImageFromSrc(objectUrl);
+      const result = drawSourceToJpegDataUrl(
+        img,
+        img.naturalWidth || img.width,
+        img.naturalHeight || img.height
+      );
+      if (result) return result;
+    } catch {
+      // Fallback to FileReader below
+    } finally {
+      URL.revokeObjectURL(objectUrl);
+    }
+  }
+
+  const fallbackUrl = await readFileAsDataUrl(file);
+  try {
+    await loadImageFromSrc(fallbackUrl);
+    return fallbackUrl;
+  } catch {
+    throw new Error(
+      'No se pudo abrir esa foto de galería. Si está en formato HEIC/RAW de iPhone, expórtala como JPG o PNG.'
+    );
+  }
 }
 
 export async function processInvoiceImageFile(file: File): Promise<ProcessedInvoiceImages> {

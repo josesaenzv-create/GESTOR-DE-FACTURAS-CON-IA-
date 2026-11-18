@@ -14,9 +14,6 @@ import {
   Check,
   Loader2,
   Eye,
-  EyeOff,
-  KeyRound,
-  PlugZap,
   WifiOff,
 } from 'lucide-react';
 import {
@@ -50,14 +47,7 @@ import {
   type ImageFilterMode,
   type ProcessedInvoiceImages,
 } from '../utils/imageProcessor';
-import {
-  GEMINI_MATH_ALERT_TEXT,
-  clearStoredGeminiApiKey,
-  getEffectiveGeminiApiKey,
-  getStoredGeminiApiKey,
-  saveStoredGeminiApiKey,
-  testGeminiApiKeyConnection,
-} from '../utils/geminiVision';
+import { GEMINI_MATH_ALERT_TEXT } from '../utils/geminiVision';
 import { saveExpenseToBackend, scanInvoiceWithGeminiApi } from '../services/credibanApi';
 
 interface ScannerTabProps {
@@ -107,16 +97,7 @@ export const ScannerTab: React.FC<ScannerTabProps> = ({
     message: string;
     canUseOfflineFallback: boolean;
   } | null>(null);
-
-  // Free Gemini API Key inline manager (works 100% client-side on GitHub Pages)
-  const [effectiveKeyInfo, setEffectiveKeyInfo] = useState(() => getEffectiveGeminiApiKey());
-  const [apiKeyDraft, setApiKeyDraft] = useState(() => getStoredGeminiApiKey());
-  const [showKeySetup, setShowKeySetup] = useState(false);
-  const [showApiKeyText, setShowApiKeyText] = useState(false);
-  const [testingKey, setTestingKey] = useState(false);
-  const [keyFeedback, setKeyFeedback] = useState<{ type: 'ok' | 'err'; text: string } | null>(
-    null
-  );
+  const [isDraggingOver, setIsDraggingOver] = useState(false);
 
   // Editable preliminary form state
   const [sede, setSede] = useState<string>(
@@ -217,50 +198,7 @@ export const ScannerTab: React.FC<ScannerTabProps> = ({
   const numericTotal = parseFloat(totalStr) || 0;
   const impactLevel = getImpactLevel(numericTotal);
 
-  const refreshKeyStatus = () => {
-    setEffectiveKeyInfo(getEffectiveGeminiApiKey());
-    setApiKeyDraft(getStoredGeminiApiKey());
-  };
-
-  useEffect(() => {
-    const syncStorage = () => refreshKeyStatus();
-    window.addEventListener('storage', syncStorage);
-    return () => window.removeEventListener('storage', syncStorage);
-  }, []);
-
-  const handleSaveInlineKey = () => {
-    saveStoredGeminiApiKey(apiKeyDraft);
-    const updated = getEffectiveGeminiApiKey();
-    setEffectiveKeyInfo(updated);
-    setKeyFeedback(
-      updated.apiKey
-        ? {
-            type: 'ok',
-            text: 'API Key guardada en este navegador. Ya puedes escanear comprobantes con Gemini 2.5 Flash.',
-          }
-        : { type: 'err', text: 'Se limpió la API Key guardada.' }
-    );
-    if (updated.apiKey) {
-      setGeminiError(null);
-    }
-  };
-
-  const handleTestInlineKey = async () => {
-    const targetKey = apiKeyDraft.trim() || effectiveKeyInfo.apiKey;
-    setTestingKey(true);
-    setKeyFeedback(null);
-    const res = await testGeminiApiKeyConnection(targetKey);
-    setTestingKey(false);
-    setKeyFeedback({ type: res.ok ? 'ok' : 'err', text: res.message });
-    if (res.ok && apiKeyDraft.trim()) {
-      saveStoredGeminiApiKey(apiKeyDraft.trim());
-      setEffectiveKeyInfo(getEffectiveGeminiApiKey());
-    }
-  };
-
-  const handleFileSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  const processSelectedFile = async (file: File) => {
     setAiMessage(null);
     setGeminiError(null);
     setAiMathAlert(null);
@@ -288,9 +226,26 @@ export const ScannerTab: React.FC<ScannerTabProps> = ({
         message: err instanceof Error ? err.message : 'Error procesando imagen.',
         canUseOfflineFallback: false,
       });
-    } finally {
-      e.target.value = '';
     }
+  };
+
+  const handleFileSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const inputEl = e.currentTarget;
+    const file = inputEl.files?.[0];
+    if (!file) return;
+    try {
+      await processSelectedFile(file);
+    } finally {
+      inputEl.value = '';
+    }
+  };
+
+  const handleDropFile = async (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    setIsDraggingOver(false);
+    const file = e.dataTransfer?.files?.[0];
+    if (!file) return;
+    await processSelectedFile(file);
   };
 
   const runGeminiAnalysis = async (
@@ -306,7 +261,7 @@ export const ScannerTab: React.FC<ScannerTabProps> = ({
       pct: 14,
       step: forceOfflineOcr
         ? 'Iniciando OCR de emergencia sin internet...'
-        : 'Preparando lectura de alta precisión con Gemini 2.5 Flash...',
+        : 'Preparando lectura de alta precisión con Gemini Flash IA...',
     });
     setAiMessage(null);
     setGeminiError(null);
@@ -362,7 +317,7 @@ export const ScannerTab: React.FC<ScannerTabProps> = ({
         type: 'ok',
         text:
           engine === 'gemini'
-            ? `Lectura Gemini 2.5 Flash completada (Confianza ${confPct}%${
+            ? `Lectura Gemini Flash IA completada (Confianza ${confPct}%${
                 result.secondPassTriggered ? ' · Doble verificación aplicada' : ''
               }). Verifica los campos antes de guardar.`
             : `Lectura OCR de emergencia sin internet completada (${confPct}%). Revisa cuidadosamente los montos y serie.`,
@@ -376,9 +331,6 @@ export const ScannerTab: React.FC<ScannerTabProps> = ({
         message: exactMessage,
         canUseOfflineFallback: !forceOfflineOcr,
       });
-      if (!effectiveKeyInfo.apiKey) {
-        setShowKeySetup(true);
-      }
     } finally {
       setScanningAi(false);
       setScanProgress(null);
@@ -610,140 +562,6 @@ export const ScannerTab: React.FC<ScannerTabProps> = ({
 
   return (
     <div className="space-y-4">
-      {/* Gemini API Key Status / Quick Setup Bar */}
-      <div
-        className={`rounded-xl border p-3.5 sm:p-4 space-y-3 ${
-          effectiveKeyInfo.apiKey
-            ? 'bg-white border-slate-200'
-            : 'bg-amber-50 border-amber-300'
-        }`}
-      >
-        <div className="flex flex-wrap items-center justify-between gap-2.5">
-          <div className="flex items-center gap-2.5 min-w-0">
-            <span
-              className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${
-                effectiveKeyInfo.apiKey
-                  ? 'bg-emerald-50 text-[#1B4332]'
-                  : 'bg-amber-100 text-amber-800'
-              }`}
-            >
-              <KeyRound className="w-4 h-4" />
-            </span>
-            <div className="min-w-0">
-              <p className="text-xs font-bold text-slate-900">
-                {effectiveKeyInfo.apiKey
-                  ? 'Motor IA Gemini 2.5 Flash Conectado (Alta Precisión)'
-                  : 'Configura tu Gemini API Key gratuita para el Escáner IA'}
-              </p>
-              <p className="text-[11px] text-slate-600">
-                {effectiveKeyInfo.apiKey
-                  ? `Origen: ${
-                      effectiveKeyInfo.source === 'localStorage'
-                        ? 'Guardada en este navegador'
-                        : 'Variable de entorno VITE_GEMINI_API_KEY'
-                    } · Ejecución 100% directa sin servidor intermedio.`
-                  : 'Sin clave guardada no se ejecutará la lectura inteligente. Obtén tu clave gratis en Google AI Studio.'}
-              </p>
-            </div>
-          </div>
-
-          <button
-            type="button"
-            onClick={() => {
-              setShowKeySetup((v) => !v);
-              setKeyFeedback(null);
-            }}
-            className={`px-3 py-1.5 text-xs font-semibold rounded-lg whitespace-nowrap shrink-0 cursor-pointer ${
-              effectiveKeyInfo.apiKey
-                ? 'bg-slate-100 hover:bg-slate-200 text-slate-800'
-                : 'bg-[#1B4332] hover:bg-[#0f291e] text-white'
-            }`}
-          >
-            {showKeySetup
-              ? 'Cerrar panel Key'
-              : effectiveKeyInfo.apiKey
-              ? 'Configurar / Cambiar API Key'
-              : 'Configurar Gemini API Key'}
-          </button>
-        </div>
-
-        {showKeySetup && (
-          <div className="pt-3 border-t border-slate-200/80 space-y-2.5">
-            <div className="flex flex-col sm:flex-row gap-2">
-              <div className="relative flex-1">
-                <input
-                  type={showApiKeyText ? 'text' : 'password'}
-                  aria-label="Gemini API Key"
-                  value={apiKeyDraft}
-                  onChange={(e) => setApiKeyDraft(e.target.value)}
-                  placeholder="Pega aquí tu clave AIzaSy... (gratuita de aistudio.google.com/apikey)"
-                  className="w-full pr-9 pl-3 py-2 text-xs font-mono bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1B4332]/25"
-                />
-                <button
-                  type="button"
-                  aria-label={showApiKeyText ? 'Ocultar API Key' : 'Mostrar API Key'}
-                  onClick={() => setShowApiKeyText((v) => !v)}
-                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700 cursor-pointer"
-                >
-                  {showApiKeyText ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                </button>
-              </div>
-              <div className="flex items-center gap-2 shrink-0">
-                <button
-                  type="button"
-                  onClick={handleSaveInlineKey}
-                  className="px-3.5 py-2 bg-[#1B4332] hover:bg-[#0f291e] text-white text-xs font-semibold rounded-lg cursor-pointer"
-                >
-                  Guardar Key
-                </button>
-                <button
-                  type="button"
-                  disabled={testingKey}
-                  onClick={handleTestInlineKey}
-                  className="px-3.5 py-2 bg-white hover:bg-slate-50 border border-slate-300 text-slate-800 text-xs font-semibold rounded-lg flex items-center gap-1.5 cursor-pointer disabled:opacity-60"
-                >
-                  {testingKey ? (
-                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                  ) : (
-                    <PlugZap className="w-3.5 h-3.5 text-[#59B447]" />
-                  )}
-                  <span>{testingKey ? 'Probando...' : 'Probar conexión'}</span>
-                </button>
-                {effectiveKeyInfo.source === 'localStorage' && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      clearStoredGeminiApiKey();
-                      refreshKeyStatus();
-                      setKeyFeedback({
-                        type: 'ok',
-                        text: 'API Key eliminada de este navegador.',
-                      });
-                    }}
-                    className="px-2.5 py-2 text-xs text-red-700 hover:bg-red-50 border border-red-200 rounded-lg cursor-pointer"
-                  >
-                    Borrar
-                  </button>
-                )}
-              </div>
-            </div>
-
-            {keyFeedback && (
-              <p
-                role="status"
-                className={`text-xs font-medium px-3 py-2 rounded-lg border ${
-                  keyFeedback.type === 'ok'
-                    ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
-                    : 'bg-red-50 border-red-200 text-red-800'
-                }`}
-              >
-                {keyFeedback.text}
-              </p>
-            )}
-          </div>
-        )}
-      </div>
-
       {/* Step 0: Select What Is Being Registered First (Collapsible Dropdown) */}
       <div className="bg-white rounded-xl border border-slate-200 p-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -805,42 +623,54 @@ export const ScannerTab: React.FC<ScannerTabProps> = ({
           </div>
 
           <input
+            id="scanner-camera-input"
             ref={cameraInputRef}
             type="file"
             accept="image/*"
             capture="environment"
             onChange={handleFileSelected}
-            className="hidden"
+            className="sr-only"
           />
           <input
+            id="scanner-gallery-input"
             ref={galleryInputRef}
             type="file"
             accept="image/*"
             onChange={handleFileSelected}
-            className="hidden"
+            className="sr-only"
           />
 
           <div className="grid grid-cols-2 gap-3">
-            <button
-              type="button"
-              onClick={() => cameraInputRef.current?.click()}
-              className="py-3 px-4 bg-[#1B4332] hover:bg-[#0f291e] text-white text-xs font-semibold rounded-lg flex items-center justify-center gap-2 transition-colors cursor-pointer"
+            <label
+              htmlFor="scanner-camera-input"
+              className="py-3 px-4 bg-[#1B4332] hover:bg-[#0f291e] text-white text-xs font-semibold rounded-lg flex items-center justify-center gap-2 transition-colors cursor-pointer select-none"
             >
               <Camera className="w-4 h-4" />
               <span>Cámara en Vivo</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => galleryInputRef.current?.click()}
-              className="py-3 px-4 bg-white hover:bg-slate-50 text-slate-800 border border-slate-300 text-xs font-semibold rounded-lg flex items-center justify-center gap-2 transition-colors cursor-pointer"
+            </label>
+            <label
+              htmlFor="scanner-gallery-input"
+              className="py-3 px-4 bg-white hover:bg-slate-50 text-slate-800 border border-slate-300 text-xs font-semibold rounded-lg flex items-center justify-center gap-2 transition-colors cursor-pointer select-none"
             >
               <Upload className="w-4 h-4" />
               <span>Subir de Galería</span>
-            </button>
+            </label>
           </div>
 
-          {/* Preview + Live Interactive Editor */}
-          <div className="mt-4 rounded-xl border border-dashed border-slate-300 bg-slate-50 overflow-hidden">
+          {/* Preview + Live Interactive Editor (supports Drag & Drop on PC) */}
+          <div
+            onDragOver={(e) => {
+              e.preventDefault();
+              setIsDraggingOver(true);
+            }}
+            onDragLeave={() => setIsDraggingOver(false)}
+            onDrop={handleDropFile}
+            className={`mt-4 rounded-xl border border-dashed overflow-hidden transition-colors ${
+              isDraggingOver
+                ? 'border-[#1B4332] bg-emerald-50/70'
+                : 'border-slate-300 bg-slate-50'
+            }`}
+          >
             {images ? (
               <div>
                 {/* Real-time rendered crop/rotation/filter output OR Original comparison */}
@@ -1146,7 +976,7 @@ export const ScannerTab: React.FC<ScannerTabProps> = ({
               <div className="flex items-start gap-2">
                 <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-red-600" />
                 <div className="space-y-1 min-w-0">
-                  <p className="font-bold">Error en lectura con Gemini 2.5 Flash</p>
+                  <p className="font-bold">Error en lectura con Gemini Flash IA</p>
                   <p className="break-words">{geminiError.message}</p>
                 </div>
               </div>
@@ -1159,14 +989,6 @@ export const ScannerTab: React.FC<ScannerTabProps> = ({
                 >
                   <RefreshCw className="w-3.5 h-3.5" />
                   <span>Reintentar con Gemini</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setShowKeySetup(true)}
-                  className="px-3 py-1.5 bg-white hover:bg-slate-50 border border-slate-300 text-slate-800 font-semibold rounded-lg flex items-center gap-1.5 cursor-pointer"
-                >
-                  <KeyRound className="w-3.5 h-3.5" />
-                  <span>Configurar API Key</span>
                 </button>
                 {geminiError.canUseOfflineFallback && (
                   <button

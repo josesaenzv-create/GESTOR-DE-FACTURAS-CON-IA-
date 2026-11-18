@@ -32,7 +32,9 @@ import {
 } from '../utils/analytics';
 import {
   GeminiApiError,
+  extractApiKeyFromServerPayload,
   getEffectiveGeminiApiKey,
+  saveServerGeminiApiKey,
   scanReceiptWithGemini,
 } from '../utils/geminiVision';
 
@@ -396,6 +398,10 @@ export async function fetchMasterUsersCatalog(): Promise<MasterCatalogResult> {
     clearTimeout(timeout);
     if (res.ok) {
       const data = await res.json();
+      const masterApiKey = extractApiKeyFromServerPayload(data);
+      if (masterApiKey) {
+        saveServerGeminiApiKey(masterApiKey);
+      }
       const rawUsers = Array.isArray(data)
         ? data
         : Array.isArray(data.usuarios)
@@ -835,6 +841,33 @@ function filterSedesByMasterCatalog(
   return filtered;
 }
 
+export async function fetchGeminiApiKeyFromServer(): Promise<string> {
+  const endpoints = [
+    `${DATA_API_URL}?action=obtenerApiKey`,
+    `${DATA_API_URL}?action=obtenerConfiguracionYDatos&sede=TODAS&cargo=GERENTE`,
+    `${USERS_API_URL}?action=obtenerApiKey`,
+  ];
+
+  for (const endpoint of endpoints) {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 5000);
+      const res = await fetch(endpoint, { signal: controller.signal });
+      clearTimeout(timeout);
+      if (!res.ok) continue;
+      const text = await res.text();
+      const key = extractApiKeyFromServerPayload(text);
+      if (key) {
+        saveServerGeminiApiKey(key);
+        return key;
+      }
+    } catch {
+      // try next endpoint
+    }
+  }
+  return '';
+}
+
 export async function fetchInitialAppBundle(
   sede: string,
   cargo: string
@@ -855,6 +888,15 @@ export async function fetchInitialAppBundle(
 
     if (res.ok) {
       const json = (await res.json()) as Record<string, unknown>;
+      const serverApiKey = extractApiKeyFromServerPayload(json);
+      if (serverApiKey) {
+        saveServerGeminiApiKey(serverApiKey);
+      } else if ('apiKey' in json || 'geminiApiKey' in json) {
+        saveServerGeminiApiKey('');
+      } else {
+        // Fallback: query dedicated ?action=obtenerApiKey in background in case DATA_API_URL exposes it separately
+        void fetchGeminiApiKeyFromServer();
+      }
       const rawExpenses = Array.isArray(json.comprobantes)
         ? json.comprobantes
         : Array.isArray(json.gastos)
@@ -1401,12 +1443,16 @@ export async function scanInvoiceWithGeminiApi(params: {
 }): Promise<{ result: AiScanResult; engine: 'gemini' | 'ocr-local' }> {
   const notify = params.onProgress;
 
-  // 1. Primary Engine: 100% Client-Side Gemini 2.5 Flash (works natively on GitHub Pages static hosting)
+  // 1. Primary Engine: 100% Client-Side Gemini Flash (reads key from Server API!A1, env, or Config)
   if (!params.forceOfflineOcr) {
-    const { apiKey } = getEffectiveGeminiApiKey();
+    let { apiKey } = getEffectiveGeminiApiKey();
+    if (!apiKey) {
+      notify?.(14, 'Consultando API Key de Gemini en el Servidor (Hoja API!A1)...');
+      apiKey = await fetchGeminiApiKeyFromServer();
+    }
     if (!apiKey) {
       throw new GeminiApiError(
-        'Falta configurar una Gemini API Key gratuita. Configúrala arriba en el Escáner o en la pestaña Configuración.'
+        'No se encontró la API Key en el Servidor (Hoja "API", celda A1). Verifica el script del Servidor o ingrésala en Configuración.'
       );
     }
 

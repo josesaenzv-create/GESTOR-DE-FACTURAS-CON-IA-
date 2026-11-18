@@ -23,6 +23,7 @@ import {
   PlugZap,
   Trash2,
   Loader2,
+  RefreshCw,
 } from 'lucide-react';
 import {
   OFFICIAL_CATEGORIES,
@@ -34,6 +35,7 @@ import {
 } from '../types/crediban';
 import {
   createSedeInBackend,
+  fetchGeminiApiKeyFromServer,
   getUserAccessOverrides,
   moveCriterionNatureInBackend,
   saveCriterionInBackend,
@@ -126,6 +128,7 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({
   const [geminiKeyInput, setGeminiKeyInput] = useState(() => getStoredGeminiApiKey());
   const [showGeminiKey, setShowGeminiKey] = useState(false);
   const [testingGemini, setTestingGemini] = useState(false);
+  const [syncingGeminiServer, setSyncingGeminiServer] = useState(false);
   const [geminiStatusMsg, setGeminiStatusMsg] = useState<{
     type: 'ok' | 'err';
     text: string;
@@ -728,17 +731,17 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({
         {renderColumn('Costo Variable', groupedByNature.variables, false)}
       </div>
 
-      {/* Gemini 2.5 Flash Free API Key Configuration */}
+      {/* Gemini 3.8 Flash Free API Key Configuration */}
       <div className="bg-white rounded-xl border border-slate-200 p-5 space-y-3.5 no-print">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2">
             <KeyRound className="w-4 h-4 text-[#1B4332]" />
             <div>
               <h3 className="text-sm font-bold text-slate-900">
-                Motor IA Gemini 2.5 Flash (API Key Gratuita)
+                Motor IA Gemini Flash (API Key Gratuita)
               </h3>
               <p className="text-xs text-slate-500">
-                Lectura de comprobantes de máxima precisión 100% desde el navegador (compatible con GitHub Pages). La clave se guarda únicamente en este dispositivo.
+                Lectura de comprobantes de máxima precisión 100% desde el navegador. La clave se lee automáticamente del Servidor (Hoja <code>API</code>, celda <code>A1</code>) al iniciar sesión; opcionalmente puedes guardar otra aquí en este navegador.
               </p>
             </div>
           </div>
@@ -749,22 +752,24 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({
                 : 'bg-amber-50 text-amber-800 border-amber-200'
             }`}
           >
-            {geminiEffective.apiKey
-              ? geminiEffective.source === 'localStorage'
-                ? 'Activa en este navegador'
-                : 'Activa (VITE_GEMINI_API_KEY)'
-              : 'Sin configurar'}
+            {geminiEffective.source === 'localStorage'
+              ? 'Clave personalizada activa'
+              : geminiEffective.source === 'env'
+              ? 'Activa (VITE_GEMINI_API_KEY)'
+              : geminiEffective.source === 'server'
+              ? 'Activa (Servidor • Hoja API!A1)'
+              : 'Pendiente en Servidor (API!A1)'}
           </span>
         </div>
 
-        <div className="flex flex-col sm:flex-row gap-2.5">
-          <div className="relative flex-1">
+        <div className="flex flex-col gap-2.5">
+          <div className="relative w-full">
             <input
               type={showGeminiKey ? 'text' : 'password'}
               aria-label="Gemini API Key Gratuita"
               value={geminiKeyInput}
               onChange={(e) => setGeminiKeyInput(e.target.value)}
-              placeholder="AIzaSy... (obtén una gratis en aistudio.google.com/apikey)"
+              placeholder="Opcional: pega otra clave si deseas sobrescribir Hoja API!A1"
               className="w-full pr-9 pl-3 py-2 text-xs font-mono bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1B4332]/25"
             />
             <button
@@ -819,6 +824,34 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({
                 <PlugZap className="w-3.5 h-3.5 text-[#59B447]" />
               )}
               <span>{testingGemini ? 'Probando...' : 'Probar conexión'}</span>
+            </button>
+            <button
+              type="button"
+              disabled={syncingGeminiServer}
+              onClick={async () => {
+                setSyncingGeminiServer(true);
+                setGeminiStatusMsg(null);
+                const fetched = await fetchGeminiApiKeyFromServer();
+                setSyncingGeminiServer(false);
+                setGeminiEffective(getEffectiveGeminiApiKey());
+                setGeminiStatusMsg(
+                  fetched
+                    ? {
+                        type: 'ok',
+                        text: 'API Key sincronizada correctamente desde el Servidor (Hoja "API", celda A1).',
+                      }
+                    : {
+                        type: 'err',
+                        text: 'El Servidor aún no devuelve una clave en la Hoja "API" celda A1. Verifica el script del Servidor.',
+                      }
+                );
+              }}
+              className="px-3.5 py-2 bg-white hover:bg-slate-50 border border-slate-300 text-slate-800 text-xs font-semibold rounded-lg flex items-center gap-1.5 cursor-pointer disabled:opacity-60"
+            >
+              <RefreshCw
+                className={`w-3.5 h-3.5 text-[#1B4332] ${syncingGeminiServer ? 'animate-spin' : ''}`}
+              />
+              <span>{syncingGeminiServer ? 'Leyendo...' : 'Leer de Servidor'}</span>
             </button>
             {geminiEffective.source === 'localStorage' && (
               <button
@@ -1415,10 +1448,23 @@ function saveBase64PhotoToDrive_(base64Str, fileName, sede, anio, mes) {
   };
 }
 
+function readApiKeyFromSheet_(ss) {
+  var apiSheet = ss.getSheetByName('API') || ss.getSheetByName('api');
+  if (!apiSheet) return '';
+  return String(apiSheet.getRange('A1').getValue() || '').trim();
+}
+
 function doGet(e) {
   try {
     var action = (e && e.parameter && e.parameter.action) || 'obtenerConfiguracionYDatos';
     var ss = SpreadsheetApp.getActiveSpreadsheet();
+
+    if (action === 'obtenerApiKey') {
+      return jsonOut_({
+        status: 'ok',
+        apiKey: readApiKeyFromSheet_(ss)
+      });
+    }
 
     if (action === 'obtenerConfiguracionYDatos') {
       var mainSheet = getMainExpensesSheet_(ss);
@@ -1439,6 +1485,7 @@ function doGet(e) {
 
       return jsonOut_({
         status: 'ok',
+        apiKey: readApiKeyFromSheet_(ss),
         comprobantes: comprobantes,
         criteriosGastos: criteriosGastos,
         sedes: sedes,

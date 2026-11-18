@@ -839,19 +839,21 @@ export const VoucherEmitterTab: React.FC<VoucherEmitterTabProps> = ({
           {/* Signed Physical Voucher Photo Capture / Post-Print Upload */}
           <div className="p-3.5 rounded-xl border border-dashed border-emerald-300 bg-emerald-50/50 space-y-2.5">
             <input
+              id="voucher-signed-camera-input"
               ref={signedCameraInputRef}
               type="file"
               accept="image/*"
               capture="environment"
               onChange={handleSignedPhotoSelected}
-              className="hidden"
+              className="sr-only"
             />
             <input
+              id="voucher-signed-gallery-input"
               ref={signedGalleryInputRef}
               type="file"
               accept="image/*"
               onChange={handleSignedPhotoSelected}
-              className="hidden"
+              className="sr-only"
             />
 
             <div className="flex flex-wrap items-center justify-between gap-2">
@@ -889,26 +891,26 @@ export const VoucherEmitterTab: React.FC<VoucherEmitterTabProps> = ({
             </div>
 
             <div className="flex flex-wrap items-center gap-2">
-              <button
-                type="button"
-                disabled={uploadingSignedPhoto}
-                onClick={() => signedCameraInputRef.current?.click()}
-                className="px-3 py-2 bg-[#1B4332] hover:bg-[#0f291e] disabled:opacity-60 text-white text-xs font-semibold rounded-lg inline-flex items-center gap-1.5 cursor-pointer"
+              <label
+                htmlFor={uploadingSignedPhoto ? undefined : 'voucher-signed-camera-input'}
+                className={`px-3 py-2 bg-[#1B4332] hover:bg-[#0f291e] text-white text-xs font-semibold rounded-lg inline-flex items-center gap-1.5 select-none ${
+                  uploadingSignedPhoto ? 'opacity-60 pointer-events-none' : 'cursor-pointer'
+                }`}
               >
                 <Camera className="w-3.5 h-3.5" />
                 <span>
                   {uploadingSignedPhoto ? 'Procesando...' : 'Fotografiar Voucher Firmado'}
                 </span>
-              </button>
-              <button
-                type="button"
-                disabled={uploadingSignedPhoto}
-                onClick={() => signedGalleryInputRef.current?.click()}
-                className="px-3 py-2 bg-white border border-slate-300 hover:bg-slate-50 disabled:opacity-60 text-slate-800 text-xs font-semibold rounded-lg inline-flex items-center gap-1.5 cursor-pointer"
+              </label>
+              <label
+                htmlFor={uploadingSignedPhoto ? undefined : 'voucher-signed-gallery-input'}
+                className={`px-3 py-2 bg-white border border-slate-300 hover:bg-slate-50 text-slate-800 text-xs font-semibold rounded-lg inline-flex items-center gap-1.5 select-none ${
+                  uploadingSignedPhoto ? 'opacity-60 pointer-events-none' : 'cursor-pointer'
+                }`}
               >
                 <Upload className="w-3.5 h-3.5" />
                 <span>Subir Foto Firmada</span>
-              </button>
+              </label>
               {signedPhoto && !lastEmittedRecord && (
                 <button
                   type="button"

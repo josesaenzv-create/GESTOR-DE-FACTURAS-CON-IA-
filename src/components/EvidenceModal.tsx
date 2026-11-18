@@ -178,19 +178,21 @@ export const EvidenceModal: React.FC<EvidenceModalProps> = ({
           {/* Left: High Resolution Invoice / Signed Voucher Photo */}
           <div className="lg:col-span-6 bg-slate-900/5 border-b lg:border-b-0 lg:border-r border-slate-200 p-5 flex flex-col items-center justify-center min-h-[260px] gap-3">
             <input
+              id="evidence-camera-input"
               ref={signedCamRef}
               type="file"
               accept="image/*"
               capture="environment"
               onChange={handleUploadSignedPhoto}
-              className="hidden"
+              className="sr-only"
             />
             <input
+              id="evidence-gallery-input"
               ref={signedFileRef}
               type="file"
               accept="image/*"
               onChange={handleUploadSignedPhoto}
-              className="hidden"
+              className="sr-only"
             />
 
             {photoUrl && !imgFailed ? (
@@ -229,24 +231,24 @@ export const EvidenceModal: React.FC<EvidenceModalProps> = ({
             )}
 
             <div className="flex flex-wrap items-center justify-center gap-2 no-print pt-1">
-              <button
-                type="button"
-                disabled={busy}
-                onClick={() => signedCamRef.current?.click()}
-                className="px-3 py-1.5 bg-[#1B4332] hover:bg-[#0f291e] disabled:opacity-60 text-white text-xs font-semibold rounded-lg inline-flex items-center gap-1.5 cursor-pointer"
+              <label
+                htmlFor={busy ? undefined : 'evidence-camera-input'}
+                className={`px-3 py-1.5 bg-[#1B4332] hover:bg-[#0f291e] text-white text-xs font-semibold rounded-lg inline-flex items-center gap-1.5 select-none ${
+                  busy ? 'opacity-60 pointer-events-none' : 'cursor-pointer'
+                }`}
               >
                 <Camera className="w-3.5 h-3.5" />
                 <span>Fotografiar Firmado</span>
-              </button>
-              <button
-                type="button"
-                disabled={busy}
-                onClick={() => signedFileRef.current?.click()}
-                className="px-3 py-1.5 bg-white border border-slate-300 hover:bg-slate-50 disabled:opacity-60 text-slate-800 text-xs font-semibold rounded-lg inline-flex items-center gap-1.5 cursor-pointer"
+              </label>
+              <label
+                htmlFor={busy ? undefined : 'evidence-gallery-input'}
+                className={`px-3 py-1.5 bg-white border border-slate-300 hover:bg-slate-50 text-slate-800 text-xs font-semibold rounded-lg inline-flex items-center gap-1.5 select-none ${
+                  busy ? 'opacity-60 pointer-events-none' : 'cursor-pointer'
+                }`}
               >
                 <Upload className="w-3.5 h-3.5" />
                 <span>{photoUrl ? 'Reemplazar Foto HD' : 'Subir Foto HD'}</span>
-              </button>
+              </label>
             </div>
 
             {photoStatusMsg && (

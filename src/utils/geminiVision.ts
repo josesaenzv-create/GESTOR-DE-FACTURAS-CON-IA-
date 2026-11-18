@@ -9,8 +9,11 @@ import {
 import { calculateIgvBreakdown, round2 } from './accounting';
 
 export const GEMINI_API_KEY_STORAGE_KEY = 'crediban_gemini_api_key';
-export const GEMINI_MODEL_ID = 'gemini-2.5-flash';
+export const SERVER_GEMINI_API_KEY_STORAGE_KEY = 'crediban_server_gemini_api_key';
+export const GEMINI_MODEL_ID = 'gemini-flash-latest';
+export const GEMINI_FALLBACK_MODEL_ID = 'gemini-3.8-flash';
 export const GEMINI_ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL_ID}:generateContent`;
+export const GEMINI_FALLBACK_ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_FALLBACK_MODEL_ID}:generateContent`;
 
 export const GEMINI_MATH_ALERT_TEXT =
   '⚠️ Verifica el monto: Subtotal + IGV o el texto "SON..." no coincide exactamente con el Total';
@@ -73,6 +76,90 @@ export function getStoredGeminiApiKey(): string {
   return '';
 }
 
+export function getServerGeminiApiKey(): string {
+  try {
+    if (typeof localStorage !== 'undefined') {
+      return String(localStorage.getItem(SERVER_GEMINI_API_KEY_STORAGE_KEY) || '').trim();
+    }
+  } catch {
+    // ignore storage access issues
+  }
+  return '';
+}
+
+export function saveServerGeminiApiKey(apiKey: string): string {
+  const clean = String(apiKey || '').trim();
+  try {
+    if (typeof localStorage !== 'undefined') {
+      if (clean) {
+        localStorage.setItem(SERVER_GEMINI_API_KEY_STORAGE_KEY, clean);
+      } else {
+        localStorage.removeItem(SERVER_GEMINI_API_KEY_STORAGE_KEY);
+      }
+    }
+  } catch {
+    // ignore storage errors
+  }
+  return clean;
+}
+
+function isLikelyGeminiApiKey(val: string): boolean {
+  const clean = val.trim();
+  if (clean.length < 20 || /\s/.test(clean)) return false;
+  if (clean.startsWith('{') || clean.startsWith('[') || clean.startsWith('<')) return false;
+  return true;
+}
+
+export function extractApiKeyFromServerPayload(payload: unknown): string {
+  if (typeof payload === 'string') {
+    const trimmed = payload.trim();
+    if (!trimmed) return '';
+    if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+      try {
+        return extractApiKeyFromServerPayload(JSON.parse(trimmed));
+      } catch {
+        return '';
+      }
+    }
+    return isLikelyGeminiApiKey(trimmed) ? trimmed : '';
+  }
+
+  if (Array.isArray(payload)) {
+    for (const item of payload) {
+      const found = extractApiKeyFromServerPayload(item);
+      if (found) return found;
+    }
+    return '';
+  }
+
+  if (payload && typeof payload === 'object') {
+    const obj = payload as Record<string, unknown>;
+    const candidateKeys = [
+      'geminiApiKey',
+      'apiKey',
+      'api_key',
+      'claveGemini',
+      'claveApi',
+      'A1',
+      'a1',
+      'api',
+      'API',
+      'key',
+      'value',
+      'valor',
+      'data',
+    ];
+    for (const k of candidateKeys) {
+      if (obj[k] !== undefined && obj[k] !== null) {
+        const found = extractApiKeyFromServerPayload(obj[k]);
+        if (found) return found;
+      }
+    }
+  }
+
+  return '';
+}
+
 export function getEnvGeminiApiKey(): string {
   try {
     const meta = import.meta as unknown as {
@@ -86,12 +173,16 @@ export function getEnvGeminiApiKey(): string {
 
 export function getEffectiveGeminiApiKey(): {
   apiKey: string;
-  source: 'localStorage' | 'env' | 'none';
+  source: 'localStorage' | 'env' | 'server' | 'none';
 } {
   const stored = getStoredGeminiApiKey();
   if (stored) return { apiKey: stored, source: 'localStorage' };
   const envKey = getEnvGeminiApiKey();
-  if (envKey) return { apiKey: envKey, source: 'env' };
+  if (envKey && envKey !== 'MY_GEMINI_API_KEY') {
+    return { apiKey: envKey, source: 'env' };
+  }
+  const serverKey = getServerGeminiApiKey();
+  if (serverKey) return { apiKey: serverKey, source: 'server' };
   return { apiKey: '', source: 'none' };
 }
 
@@ -724,17 +815,18 @@ Revisa los decimales y dígitos con lupa en la imagen original y devuelve el JSO
   };
 }
 
-async function callGeminiEndpoint(
+async function postToGeminiUrl(
+  endpointUrl: string,
   apiKey: string,
   payload: Record<string, unknown>,
-  timeoutMs = 35000
-): Promise<GeminiRawReceiptJson> {
+  timeoutMs: number
+): Promise<{ response: Response; rawText: string; data: Record<string, unknown> | null }> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   let response: Response;
   try {
-    response = await fetch(`${GEMINI_ENDPOINT}?key=${encodeURIComponent(apiKey)}`, {
+    response = await fetch(`${endpointUrl}?key=${encodeURIComponent(apiKey)}`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -764,6 +856,25 @@ async function callGeminiEndpoint(
   } catch {
     data = null;
   }
+  return { response, rawText, data };
+}
+
+async function callGeminiEndpoint(
+  apiKey: string,
+  payload: Record<string, unknown>,
+  timeoutMs = 40000
+): Promise<GeminiRawReceiptJson> {
+  let attempt = await postToGeminiUrl(GEMINI_ENDPOINT, apiKey, payload, timeoutMs);
+
+  // Automatic fallback if primary model is unavailable or experiencing transient 503/429 load spikes
+  if (
+    !attempt.response.ok &&
+    [404, 429, 500, 502, 503, 504].includes(attempt.response.status)
+  ) {
+    attempt = await postToGeminiUrl(GEMINI_FALLBACK_ENDPOINT, apiKey, payload, timeoutMs);
+  }
+
+  const { response, rawText, data } = attempt;
 
   if (!response.ok) {
     const errObj = (data?.error || {}) as {
@@ -824,7 +935,7 @@ export async function scanReceiptWithGemini(params: {
     );
   }
 
-  params.onProgress?.(25, 'Analizando comprobante con Gemini 2.5 Flash (Alta Precisión)...');
+  params.onProgress?.(25, 'Analizando comprobante con Gemini Flash IA (Alta Precisión)...');
   const pass1Payload = buildGeminiRequestPayload({
     imageBase64: params.imageBase64,
     mimeType: params.mimeType,
@@ -910,24 +1021,21 @@ export async function testGeminiApiKeyConnection(
   }
 
   try {
-    const res = await fetch(`${GEMINI_ENDPOINT}?key=${encodeURIComponent(cleanKey)}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: 'Responde únicamente: OK' }] }],
-        generationConfig: {
-          temperature: 0.0,
-          maxOutputTokens: 16,
-        },
-      }),
-    });
-    const raw = await res.text();
-    let parsed: Record<string, unknown> | null = null;
-    try {
-      parsed = JSON.parse(raw) as Record<string, unknown>;
-    } catch {
-      parsed = null;
+    const testPayload = {
+      contents: [{ parts: [{ text: 'Responde únicamente: OK' }] }],
+      generationConfig: {
+        temperature: 0.0,
+        maxOutputTokens: 16,
+      },
+    };
+    let attempt = await postToGeminiUrl(GEMINI_ENDPOINT, cleanKey, testPayload, 15000);
+    let activeModel = GEMINI_MODEL_ID;
+    if (!attempt.response.ok && attempt.response.status === 404) {
+      attempt = await postToGeminiUrl(GEMINI_FALLBACK_ENDPOINT, cleanKey, testPayload, 15000);
+      activeModel = GEMINI_FALLBACK_MODEL_ID;
     }
+
+    const { response: res, rawText: raw, data: parsed } = attempt;
 
     if (!res.ok) {
       const errObj = (parsed?.error || {}) as { message?: string; status?: string };
@@ -941,7 +1049,7 @@ export async function testGeminiApiKeyConnection(
 
     return {
       ok: true,
-      message: `Conexión exitosa con ${GEMINI_MODEL_ID}. El escáner IA de alta precisión está listo.`,
+      message: `Conexión exitosa con ${activeModel}. El escáner IA de alta precisión está listo.`,
     };
   } catch (err) {
     return {

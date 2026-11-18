@@ -3,8 +3,14 @@ import assert from 'node:assert/strict';
 import {
   auditGeminiExtraction,
   buildGeminiRequestPayload,
+  extractApiKeyFromServerPayload,
+  GEMINI_MODEL_ID,
   GEMINI_RESPONSE_SCHEMA,
+  getEffectiveGeminiApiKey,
+  hasGeminiApiKey,
   parseMontoEnLetrasPeru,
+  saveServerGeminiApiKey,
+  saveStoredGeminiApiKey,
 } from './geminiVision';
 import { DEFAULT_CRITERIA } from '../data/seedData';
 
@@ -148,4 +154,68 @@ test('buildGeminiRequestPayload configures temperature 0.0, topP 0.1, topK 1 and
     'tipoComprobante',
   ]);
   assert.equal(GEMINI_RESPONSE_SCHEMA.propertyOrdering.length, 18);
+});
+
+test('extractApiKeyFromServerPayload extracts key from sheet API!A1 JSON, array, or text formats', () => {
+  const sampleKey = 'TEST_SAMPLE_KEY_ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+  assert.equal(
+    extractApiKeyFromServerPayload(JSON.stringify({ status: 'ok', apiKey: sampleKey })),
+    sampleKey
+  );
+  assert.equal(
+    extractApiKeyFromServerPayload({ geminiApiKey: sampleKey }),
+    sampleKey
+  );
+  assert.equal(
+    extractApiKeyFromServerPayload({ A1: sampleKey }),
+    sampleKey
+  );
+  assert.equal(
+    extractApiKeyFromServerPayload([[sampleKey]]),
+    sampleKey
+  );
+  assert.equal(extractApiKeyFromServerPayload(sampleKey), sampleKey);
+  assert.equal(extractApiKeyFromServerPayload({ status: 'error', message: 'fail' }), '');
+  assert.equal(extractApiKeyFromServerPayload('too-short'), '');
+});
+
+test('getEffectiveGeminiApiKey resolves server-synced key cleanly and targets gemini-flash-latest', () => {
+  const store = new Map<string, string>();
+  const originalStorage = (globalThis as { localStorage?: Storage }).localStorage;
+  (globalThis as { localStorage?: unknown }).localStorage = {
+    getItem: (k: string) => store.get(k) ?? null,
+    setItem: (k: string, v: string) => {
+      store.set(k, v);
+    },
+    removeItem: (k: string) => {
+      store.delete(k);
+    },
+  };
+
+  try {
+    const serverKey = 'SERVER_SHEET_A1_SAMPLE_KEY_1234567890';
+    const overrideKey = 'CUSTOM_LOCAL_SAMPLE_KEY_0987654321';
+
+    assert.equal(hasGeminiApiKey(), false);
+    assert.equal(getEffectiveGeminiApiKey().source, 'none');
+
+    saveServerGeminiApiKey(serverKey);
+    const fromServer = getEffectiveGeminiApiKey();
+    assert.equal(hasGeminiApiKey(), true);
+    assert.equal(fromServer.source, 'server');
+    assert.equal(fromServer.apiKey, serverKey);
+
+    saveStoredGeminiApiKey(overrideKey);
+    const fromOverride = getEffectiveGeminiApiKey();
+    assert.equal(fromOverride.source, 'localStorage');
+    assert.equal(fromOverride.apiKey, overrideKey);
+
+    assert.equal(GEMINI_MODEL_ID, 'gemini-flash-latest');
+  } finally {
+    if (originalStorage === undefined) {
+      delete (globalThis as { localStorage?: unknown }).localStorage;
+    } else {
+      (globalThis as { localStorage?: Storage }).localStorage = originalStorage;
+    }
+  }
 });
