@@ -2,7 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildBudgetKey,
+  canUserAccessBudgetTab,
   computeBudgetProgress,
+  createDefaultBudgetFromSede,
   getPreviousMonthPeriod,
   replicateBudgetToMonth,
   resolveUserBudgetVisibility,
@@ -59,8 +61,25 @@ test('computeBudgetProgress calculates Fijo, Variable, and optional detailed par
   assert.equal(progress.partidasProgress[0].status, 'Saludable');
 });
 
-test('resolveUserBudgetVisibility enforces Gerente full access and per-user partial visibility', () => {
-  const budget: MonthlySedeBudget = {
+test('resolveUserBudgetVisibility & canUserAccessBudgetTab grant Gerente+Administrador by default and hide Cajeros/Asesores until enabled', () => {
+  const defaultBudget = createDefaultBudgetFromSede(undefined, 'HUACHO', '2026', 'NOVIEMBRE');
+  assert.equal(defaultBudget.visibilidadPorDefecto, 'HIDDEN');
+
+  const gerente = { usuario: 'JOSE_SAENZ', cargo: 'GERENTE DE OPERACIONES', sede: 'TODAS' };
+  const admin = { usuario: 'ADMIN_HUA', cargo: 'ADMINISTRADOR DE SEDE', sede: 'HUACHO' };
+  const cajero = { usuario: 'CAJA_HUACHO', cargo: 'CAJERO', sede: 'HUACHO' };
+  const asesor = { usuario: 'ASESOR1', cargo: 'ASESOR', sede: 'HUACHO' };
+
+  // Default with no budget enabled for Cajeros
+  assert.equal(canUserAccessBudgetTab(gerente, [defaultBudget]), true);
+  assert.equal(canUserAccessBudgetTab(admin, [defaultBudget]), true);
+  assert.equal(canUserAccessBudgetTab(cajero, [defaultBudget]), false);
+  assert.equal(canUserAccessBudgetTab(asesor, [defaultBudget]), false);
+  assert.equal(resolveUserBudgetVisibility(defaultBudget, admin), 'ALL');
+  assert.equal(resolveUserBudgetVisibility(defaultBudget, cajero), 'HIDDEN');
+
+  // When Gerencia explicitly enables partial visibility for Cajero
+  const partialBudget: MonthlySedeBudget = {
     id: 'HUARAZ::2026::NOVIEMBRE',
     sede: 'HUARAZ',
     anio: '2026',
@@ -68,7 +87,7 @@ test('resolveUserBudgetVisibility enforces Gerente full access and per-user part
     presupuestoFijoTotal: 4000,
     presupuestoVariableTotal: 1200,
     partidas: [],
-    visibilidadPorDefecto: 'ONLY_VARIABLE',
+    visibilidadPorDefecto: 'HIDDEN',
     visibilidadPorUsuario: {
       CAJA_HUARAZ: 'ONLY_VARIABLE',
       ASESOR_TOP: 'HIDDEN',
@@ -76,7 +95,7 @@ test('resolveUserBudgetVisibility enforces Gerente full access and per-user part
   };
 
   assert.equal(
-    resolveUserBudgetVisibility(budget, {
+    resolveUserBudgetVisibility(partialBudget, {
       usuario: 'JOSE_SAENZ',
       cargo: 'GERENTE DE OPERACIONES',
       sede: 'TODAS',
@@ -84,7 +103,7 @@ test('resolveUserBudgetVisibility enforces Gerente full access and per-user part
     'ALL'
   );
   assert.equal(
-    resolveUserBudgetVisibility(budget, {
+    resolveUserBudgetVisibility(partialBudget, {
       usuario: 'CAJA_HUARAZ',
       cargo: 'CAJERO',
       sede: 'HUARAZ',
@@ -92,7 +111,14 @@ test('resolveUserBudgetVisibility enforces Gerente full access and per-user part
     'ONLY_VARIABLE'
   );
   assert.equal(
-    resolveUserBudgetVisibility(budget, {
+    canUserAccessBudgetTab(
+      { usuario: 'CAJA_HUARAZ', cargo: 'CAJERO', sede: 'HUARAZ' },
+      [partialBudget]
+    ),
+    true
+  );
+  assert.equal(
+    resolveUserBudgetVisibility(partialBudget, {
       usuario: 'ASESOR_TOP',
       cargo: 'ASESOR',
       sede: 'HUARAZ',

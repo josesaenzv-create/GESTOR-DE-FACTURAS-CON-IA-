@@ -23,7 +23,12 @@ import {
   type SedeRecord,
   type UserSession,
 } from '../types/crediban';
-import { formatCurrencySoles, isManagerUser, round2 } from '../utils/accounting';
+import {
+  formatCurrencySoles,
+  isAdminOrManagerUser,
+  isManagerUser,
+  round2,
+} from '../utils/accounting';
 import {
   buildBudgetKey,
   computeBudgetProgress,
@@ -202,10 +207,10 @@ export const BudgetTab: React.FC<BudgetTabProps> = ({
     [budgets]
   );
 
-  // Collaborators belonging to the selected Sede (for per-user visibility overrides)
+  // Collaborators belonging to the selected Sede (Cajeros & Asesores; Gerentes & Administradores always have full access)
   const sedeCollaborators = useMemo(() => {
     return usersDirectory.filter((u) => {
-      if (isManagerUser(u)) return false;
+      if (isAdminOrManagerUser(u)) return false;
       const uSede = String(u.sede || '').toUpperCase();
       return uSede === effectiveSede || uSede === 'TODAS';
     });
@@ -1016,7 +1021,7 @@ export const BudgetTab: React.FC<BudgetTabProps> = ({
                   Control de Visibilidad del Presupuesto ({effectiveSede})
                 </h3>
                 <p className="text-xs text-slate-500">
-                  Define quién puede ver este presupuesto y qué parte mostrar (por ejemplo, ocultar planillas fijas y mostrar solo gastos variables).
+                  Por defecto solo <strong>Gerentes y Administradores</strong> ven la pestaña Presupuesto; Cajeros y Asesores inician en <strong>Oculto</strong> hasta que habilites su acceso aquí.
                 </p>
               </div>
               <div className="w-full sm:w-72">

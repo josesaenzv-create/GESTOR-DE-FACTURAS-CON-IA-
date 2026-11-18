@@ -26,6 +26,19 @@ import {
   resolveUserSystemAccess,
 } from '../utils/accounting';
 import { parsePeruReceiptText } from '../utils/ocrParser';
+import { detectSunatQrFromImage } from '../utils/sunatQrParser';
+import {
+  extractSpatialTokensFromTesseract,
+  mergeQrAndSpatialOcr,
+  parseSpatialReceipt,
+} from '../utils/spatialReceiptParser';
+import {
+  enqueueOfflineExpense,
+  listOfflineExpenses,
+  lookupSupplierByRucOffline,
+  removeOfflineExpense,
+  syncSuppliersFromExpenses,
+} from '../utils/offlineQueue';
 import {
   calculateSalesIgvBreakdown,
   type MonthlySalesEntry,
@@ -960,7 +973,7 @@ export async function fetchInitialAppBundle(
                 presupuestoVariableTotal: Number(row.VARIABLE_TOTAL || 0),
                 partidas: [],
                 visibilidadPorDefecto:
-                  (String(row.VISIBILIDAD_DEFECTO || 'ALL') as MonthlySedeBudget['visibilidadPorDefecto']),
+                  (String(row.VISIBILIDAD_DEFECTO || 'HIDDEN') as MonthlySedeBudget['visibilidadPorDefecto']),
                 visibilidadPorUsuario: {},
               });
             }
@@ -1009,6 +1022,7 @@ export async function fetchInitialAppBundle(
       writeCache(LOCAL_CACHE_KEYS.expenses, expenses);
       writeCache(LOCAL_CACHE_KEYS.criteria, criteria);
       writeCache(LOCAL_CACHE_KEYS.sedes, activeSedes);
+      void syncSuppliersFromExpenses(expenses);
 
       return {
         expenses,
@@ -1094,39 +1108,121 @@ export async function saveExpenseToBackend(
 
   let updatedRecord = { ...record };
   let synced = false;
+  let queuedOffline = false;
   let msg = '';
 
-  try {
-    const res = await postToDataApi<Record<string, unknown>>(payload);
-    if (res && res.status !== 'error') {
-      synced = true;
-      const driveView = String(res.urlView || res.linkFotoView || '');
-      const driveThumb = String(res.urlThumbnail || res.linkFotoHd || '');
-      if (driveThumb || driveView) {
-        updatedRecord.linkFotoHd = normalizeDriveImageUrl(driveThumb || driveView);
-        updatedRecord.linkFotoView = driveView || driveThumb;
+  const online = typeof navigator === 'undefined' ? true : navigator.onLine !== false;
+  if (online) {
+    try {
+      const res = await postToDataApi<Record<string, unknown>>(payload);
+      if (res && res.status !== 'error') {
+        synced = true;
+        const driveView = String(res.urlView || res.linkFotoView || '');
+        const driveThumb = String(res.urlThumbnail || res.linkFotoHd || '');
+        if (driveThumb || driveView) {
+          updatedRecord.linkFotoHd = normalizeDriveImageUrl(driveThumb || driveView);
+          updatedRecord.linkFotoView = driveView || driveThumb;
+        }
+        if (res.idRegistro || res.id) {
+          updatedRecord.id = String(res.idRegistro || res.id);
+        }
+        msg = 'Comprobante guardado en el Servidor y Nube HD.';
+      } else {
+        msg = String(res?.message || 'Error en Servidor; guardado en cola offline IndexedDB.');
       }
-      if (res.idRegistro || res.id) {
-        updatedRecord.id = String(res.idRegistro || res.id);
-      }
-      msg = 'Comprobante guardado en el Servidor y Nube HD.';
-    } else {
-      msg = String(res?.message || 'Guardado localmente; pendiente sincronización con Servidor.');
+    } catch {
+      msg = 'Sin respuesta del Servidor; guardado en cola offline IndexedDB para sincronizar al volver la señal.';
     }
-  } catch {
-    msg = 'Sin respuesta del Servidor; guardado en caché local.';
+  } else {
+    msg = 'Modo sin internet: comprobante y foto HD guardados en cola offline IndexedDB.';
+  }
+
+  if (!synced) {
+    queuedOffline = await enqueueOfflineExpense({
+      record: updatedRecord,
+      fotoBase64HD,
+      nombreArchivoFoto,
+      lastError: msg,
+    });
   }
 
   const current = readCache<ExpenseRecord[]>(LOCAL_CACHE_KEYS.expenses, SEED_EXPENSES);
   const next = [updatedRecord, ...current.filter((r) => r.id !== updatedRecord.id)];
   writeCache(LOCAL_CACHE_KEYS.expenses, next);
+  void syncSuppliersFromExpenses([updatedRecord]);
 
   return {
     ok: true,
     savedRecord: updatedRecord,
     syncedToCloud: synced,
-    message: msg,
+    message: queuedOffline && !synced ? `${msg}` : msg,
   };
+}
+
+export async function syncPendingOfflineExpenses(): Promise<{
+  syncedCount: number;
+  remainingCount: number;
+}> {
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    const pending = await listOfflineExpenses();
+    return { syncedCount: 0, remainingCount: pending.length };
+  }
+
+  const pending = await listOfflineExpenses();
+  if (pending.length === 0) return { syncedCount: 0, remainingCount: 0 };
+
+  let syncedCount = 0;
+  for (const item of pending) {
+    try {
+      const r = item.record;
+      const res = await postToDataApi<Record<string, unknown>>({
+        action: 'registrarComprobante',
+        idRegistro: r.id,
+        sede: r.sede,
+        filial: r.sede,
+        anio: r.anio,
+        periodo: r.mes,
+        mes: r.mes,
+        categoria: r.categoriaForms,
+        naturaleza: r.naturaleza,
+        categoriaPrincipal: r.categoriaPrincipal,
+        subtipo: r.subtipo,
+        tipoComprobante: r.tipoComprobante,
+        fechaEmision: r.fecha,
+        numeroComprobante: r.numeroComprobante,
+        razonSocial: r.razonSocial,
+        nombreComercial: r.nombreComercial,
+        ruc: r.ruc,
+        subtotal: r.subtotal,
+        igv: r.igv,
+        total: r.total,
+        montoConComa: formatCommaDecimal(r.total),
+        igvConComa: formatCommaDecimal(r.igv),
+        descripcion: r.descripcion,
+        nivelImpacto: r.nivelImpacto,
+        responsable: r.responsable,
+        cargoUsuario: r.cargoUsuario,
+        titularCuenta: r.titularCuenta || '',
+        numeroOperacion: r.numeroOperacion || '',
+        entidadPago: r.entidadPago || '',
+        telefonoCuenta: r.telefonoCuenta || '',
+        direccionGps: r.direccionGps,
+        coordenadasGps: r.coordenadasGps,
+        linkMapa: r.linkMapa,
+        fotoBase64HD: item.fotoBase64HD || '',
+        nombreArchivoFoto: item.nombreArchivoFoto || '',
+      });
+      if (res && res.status !== 'error') {
+        await removeOfflineExpense(item.id);
+        syncedCount++;
+      }
+    } catch {
+      // Keep in queue for next connectivity retry
+    }
+  }
+
+  const remaining = await listOfflineExpenses();
+  return { syncedCount, remainingCount: remaining.length };
 }
 
 export async function updateExpenseInBackend(
@@ -1432,31 +1528,196 @@ export async function saveSedeCustomizationInBackend(
   return { ok: true, syncedToCloud: synced, message: msg };
 }
 
+export type ScanEngineLabel = 'ocr-verified' | 'ocr-local' | 'gemini';
+
+export async function runOfflineLayeredOcr(params: {
+  imageBase64: string;
+  imageDataUrl?: string;
+  ocrDataUrl?: string;
+  mimeType: string;
+  criteria: ExpenseCriterion[];
+  expectedTipo?: TipoComprobante;
+  onProgress?: (pct: number, step: string) => void;
+}): Promise<
+  AiScanResult & {
+    qrVerified: boolean;
+    needsAiEscalation: boolean;
+  }
+> {
+  const notify = params.onProgress;
+  const iaDataUrl =
+    params.imageDataUrl || `data:${params.mimeType || 'image/jpeg'};base64,${params.imageBase64}`;
+  const ocrInputUrl = params.ocrDataUrl || iaDataUrl;
+
+  notify?.(12, 'Capa 0: Buscando código QR SUNAT offline (zxing-wasm)...');
+  const qrData = await detectSunatQrFromImage(iaDataUrl);
+
+  notify?.(
+    24,
+    qrData
+      ? `QR SUNAT detectado (${qrData.serieCorrelativo}). Leyendo razón social y detalle...`
+      : 'Capa 1: Iniciando OCR espacial offline (Tesseract v7)...'
+  );
+
+  const { createWorker } = await import('tesseract.js');
+  const worker = await createWorker('spa+eng', 1, {
+    logger: (m: { status?: string; progress?: number }) => {
+      const status = String(m?.status || '').toLowerCase();
+      const rawProgress = typeof m?.progress === 'number' ? m.progress : 0;
+      if (status.includes('loading tesseract core')) {
+        notify?.(30, 'Cargando núcleo OCR offline...');
+      } else if (status.includes('loading language traineddata')) {
+        notify?.(Math.min(40, Math.round(32 + rawProgress * 8)), 'Cargando diccionario español/números...');
+      } else if (status.includes('recognizing text')) {
+        const pct = Math.min(58, Math.max(42, Math.round(42 + rawProgress * 16)));
+        notify?.(pct, `Agrupando filas espaciales offline (${pct}%)...`);
+      }
+    },
+  });
+
+  try {
+    await worker.setParameters({
+      tessedit_pageseg_mode: '3' as unknown as import('tesseract.js').PSM,
+    });
+    const rec = await worker.recognize(ocrInputUrl, {}, { blocks: true });
+    const dataAny = rec.data as Parameters<typeof extractSpatialTokensFromTesseract>[0] & {
+      text?: string;
+    };
+    const tokens = extractSpatialTokensFromTesseract(dataAny);
+    const spatial =
+      tokens.length > 0
+        ? parseSpatialReceipt({
+            tokens,
+            rawText: dataAny.text || '',
+            criteria: params.criteria,
+            expectedTipo: params.expectedTipo,
+          })
+        : {
+            ...parsePeruReceiptText(dataAny.text || '', params.criteria, params.expectedTipo),
+            montoEnLetrasParsed: null,
+            qrVerified: false,
+            alerts: [],
+          };
+
+    notify?.(62, 'Auditando RUC Módulo 11, cuadre IGV 2026 y monto en letras...');
+    const merged = mergeQrAndSpatialOcr({
+      qr: qrData,
+      spatial,
+      criteria: params.criteria,
+      expectedTipo: params.expectedTipo,
+    });
+
+    // Offline supplier lookup enrichment when RUC is valid
+    if (merged.ruc && (!merged.razonSocial || merged.razonSocial.length < 4)) {
+      const cachedSupplier = await lookupSupplierByRucOffline(merged.ruc);
+      if (cachedSupplier) {
+        merged.razonSocial = cachedSupplier.razonSocial;
+        if (!merged.nombreComercial && cachedSupplier.nombreComercial) {
+          merged.nombreComercial = cachedSupplier.nombreComercial;
+        }
+      }
+    }
+
+    return merged;
+  } finally {
+    await worker.terminate();
+  }
+}
+
 export async function scanInvoiceWithGeminiApi(params: {
   imageBase64: string;
   imageDataUrl?: string;
+  ocrDataUrl?: string;
   mimeType: string;
   criteria: ExpenseCriterion[];
   expectedTipo?: TipoComprobante;
   forceOfflineOcr?: boolean;
+  mode?: 'hybrid' | 'force-offline' | 'force-gemini';
   onProgress?: (pct: number, step: string) => void;
-}): Promise<{ result: AiScanResult; engine: 'gemini' | 'ocr-local' }> {
+}): Promise<{
+  result: AiScanResult;
+  engine: ScanEngineLabel;
+  qrVerified?: boolean;
+  escalatedFromOfflinePct?: number;
+  geminiWarning?: string;
+}> {
   const notify = params.onProgress;
+  const effectiveMode =
+    params.mode || (params.forceOfflineOcr ? 'force-offline' : 'hybrid');
 
-  // 1. Primary Engine: 100% Client-Side Gemini Flash (reads key from Server API!A1, env, or Config)
-  if (!params.forceOfflineOcr) {
-    let { apiKey } = getEffectiveGeminiApiKey();
-    if (!apiKey) {
-      notify?.(14, 'Consultando API Key de Gemini en el Servidor (Hoja API!A1)...');
-      apiKey = await fetchGeminiApiKeyFromServer();
+  let offlineResult:
+    | (AiScanResult & { qrVerified: boolean; needsAiEscalation: boolean })
+    | null = null;
+
+  // 1. Offline-First Layered Engine (QR SUNAT + Spatial OCR + 2026 Peruvian Validator)
+  if (effectiveMode !== 'force-gemini') {
+    offlineResult = await runOfflineLayeredOcr({
+      imageBase64: params.imageBase64,
+      imageDataUrl: params.imageDataUrl,
+      ocrDataUrl: params.ocrDataUrl,
+      mimeType: params.mimeType,
+      criteria: params.criteria,
+      expectedTipo: params.expectedTipo,
+      onProgress: notify,
+    });
+
+    const offlinePct = offlineResult.confianzaLectura ?? Math.round(offlineResult.scoreConfiabilidad * 100);
+    const qualifiedOffline =
+      offlinePct >= 95 && Boolean(offlineResult.mathVerified) && offlineResult.total > 0;
+
+    if (effectiveMode === 'force-offline') {
+      notify?.(100, `OCR Offline completado (${offlinePct}%).`);
+      return {
+        result: offlineResult,
+        engine: qualifiedOffline ? 'ocr-verified' : 'ocr-local',
+        qrVerified: offlineResult.qrVerified,
+      };
     }
-    if (!apiKey) {
-      throw new GeminiApiError(
-        'No se encontró la API Key en el Servidor (Hoja "API", celda A1). Verifica el script del Servidor o ingrésala en Configuración.'
+
+    if (qualifiedOffline) {
+      notify?.(
+        100,
+        offlineResult.qrVerified
+          ? `QR SUNAT + OCR verificados offline (${offlinePct}%).`
+          : `OCR Espacial verificado offline (${offlinePct}%).`
       );
+      return {
+        result: offlineResult,
+        engine: 'ocr-verified',
+        qrVerified: offlineResult.qrVerified,
+      };
     }
 
-    const result = await scanReceiptWithGemini({
+    notify?.(
+      66,
+      `Lectura offline al ${offlinePct}% (< 95%): escalando a Gemini Flash IA para verificación...`
+    );
+  }
+
+  // 2. Gemini Vision Escalation (Automatic when Offline < 95%, or Manual 'force-gemini')
+  let { apiKey } = getEffectiveGeminiApiKey();
+  if (!apiKey) {
+    notify?.(68, 'Consultando API Key de Gemini en el Servidor (Hoja API!A1)...');
+    apiKey = await fetchGeminiApiKeyFromServer();
+  }
+
+  if (!apiKey) {
+    const missingMsg =
+      'No se encontró la API Key en el Servidor (Hoja "API", celda A1). Verifica el script del Servidor o ingrésala en Configuración.';
+    if (offlineResult && offlineResult.total > 0) {
+      notify?.(100, 'Usando lectura offline (Gemini IA sin clave configurada).');
+      return {
+        result: offlineResult,
+        engine: 'ocr-local',
+        qrVerified: offlineResult.qrVerified,
+        geminiWarning: missingMsg,
+      };
+    }
+    throw new GeminiApiError(missingMsg);
+  }
+
+  try {
+    const geminiRes = await scanReceiptWithGemini({
       apiKey,
       imageBase64: params.imageBase64,
       mimeType: params.mimeType,
@@ -1464,43 +1725,34 @@ export async function scanInvoiceWithGeminiApi(params: {
       expectedTipo: params.expectedTipo,
       onProgress: notify,
     });
-    return { result, engine: 'gemini' };
-  }
 
-  // 2. Explicit Manual Emergency Offline Fallback: Tesseract.js (never triggered silently)
-  notify?.(24, 'Iniciando OCR de emergencia sin internet (Tesseract)...');
-  const { createWorker } = await import('tesseract.js');
-  const dataUrl =
-    params.imageDataUrl || `data:${params.mimeType || 'image/jpeg'};base64,${params.imageBase64}`;
+    // If Layer 0 SUNAT QR was decoded, guarantee fiscal exactness from QR when available
+    if (offlineResult?.qrVerified) {
+      if (offlineResult.ruc) geminiRes.ruc = offlineResult.ruc;
+      if (offlineResult.numeroComprobante) geminiRes.numeroComprobante = offlineResult.numeroComprobante;
+      if (offlineResult.fechaEmision) geminiRes.fechaEmision = offlineResult.fechaEmision;
+    }
 
-  const worker = await createWorker('spa+eng', 1, {
-    logger: (m: { status?: string; progress?: number }) => {
-      const status = String(m?.status || '').toLowerCase();
-      const rawProgress = typeof m?.progress === 'number' ? m.progress : 0;
-      if (status.includes('loading tesseract core')) {
-        notify?.(32, 'Cargando núcleo OCR offline en memoria...');
-      } else if (status.includes('initializing tesseract')) {
-        notify?.(42, 'Inicializando lector de emergencia...');
-      } else if (status.includes('loading language traineddata')) {
-        notify?.(Math.min(58, Math.round(44 + rawProgress * 14)), 'Cargando diccionario español/números...');
-      } else if (status.includes('initializing api')) {
-        notify?.(62, 'Preparando análisis offline...');
-      } else if (status.includes('recognizing text')) {
-        const pct = Math.min(92, Math.max(64, Math.round(64 + rawProgress * 28)));
-        notify?.(pct, `Extrayendo texto sin internet (${pct}%)...`);
-      }
-    },
-  });
-  try {
-    notify?.(60, 'Analizando texto del comprobante sin internet...');
-    const {
-      data: { text },
-    } = await worker.recognize(dataUrl);
-    notify?.(96, 'Clasificando naturaleza contable y campos...');
-    const parsed = parsePeruReceiptText(text || '', params.criteria, params.expectedTipo);
-    notify?.(100, 'Lectura offline completada.');
-    return { result: parsed, engine: 'ocr-local' };
-  } finally {
-    await worker.terminate();
+    return {
+      result: geminiRes,
+      engine: 'gemini',
+      qrVerified: offlineResult?.qrVerified,
+      escalatedFromOfflinePct: offlineResult
+        ? offlineResult.confianzaLectura ?? Math.round(offlineResult.scoreConfiabilidad * 100)
+        : undefined,
+    };
+  } catch (err) {
+    const exactMessage =
+      err instanceof Error ? err.message : 'Error al consultar la API de Gemini.';
+    if (effectiveMode === 'hybrid' && offlineResult && (offlineResult.total > 0 || offlineResult.ruc || offlineResult.numeroComprobante)) {
+      notify?.(100, 'Gemini IA no disponible: conservando borrador OCR offline.');
+      return {
+        result: offlineResult,
+        engine: 'ocr-local',
+        qrVerified: offlineResult.qrVerified,
+        geminiWarning: exactMessage,
+      };
+    }
+    throw err;
   }
 }

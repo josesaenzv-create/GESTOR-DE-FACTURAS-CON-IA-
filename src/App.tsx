@@ -10,6 +10,11 @@ import {
   Sliders,
   Receipt,
   Wallet,
+  CloudUpload,
+  Sparkles,
+  Wifi,
+  WifiOff,
+  Loader2,
 } from 'lucide-react';
 import {
   CREDIBAN_COMPANY,
@@ -29,8 +34,16 @@ import {
 import {
   fetchInitialAppBundle,
   loadMonthlyBudgets,
+  syncPendingOfflineExpenses,
 } from './services/credibanApi';
 import { isManagerUser, resolveUserSystemAccess } from './utils/accounting';
+import { canUserAccessBudgetTab } from './utils/budgets';
+import { listOfflineExpenses } from './utils/offlineQueue';
+import {
+  checkGeminiApiHealth,
+  getEffectiveGeminiApiKey,
+  type GeminiApiHealthStatus,
+} from './utils/geminiVision';
 import { CredibanLogo } from './components/CredibanLogo';
 import { LoginScreen } from './components/LoginScreen';
 import { ScannerTab } from './components/ScannerTab';
@@ -102,9 +115,46 @@ export default function App() {
   const [syncing, setSyncing] = useState(false);
   const [syncSource, setSyncSource] = useState<'live' | 'cache'>('cache');
   const [selectedExpense, setSelectedExpense] = useState<ExpenseRecord | null>(null);
+  const [geminiHealth, setGeminiHealth] = useState<GeminiApiHealthStatus>({
+    status: 'missing',
+    message: 'Verificando conexión Gemini IA...',
+  });
+  const [checkingGeminiHealth, setCheckingGeminiHealth] = useState(false);
+  const [pendingOfflineCount, setPendingOfflineCount] = useState(0);
+  const [syncingOfflineQueue, setSyncingOfflineQueue] = useState(false);
 
   const isManager = isManagerUser(user);
+  const canSeeBudget = canUserAccessBudgetTab(user, budgets);
   const isMobileMode = viewMode === 'mobile';
+  const mobileTabCount = 3 + (canSeeBudget ? 1 : 0) + (isManager ? 2 : 0);
+  const mobileGridClass =
+    mobileTabCount === 6
+      ? 'grid-cols-6'
+      : mobileTabCount === 5
+      ? 'grid-cols-5'
+      : mobileTabCount === 4
+      ? 'grid-cols-4'
+      : 'grid-cols-3';
+
+  const refreshOfflineCount = useCallback(async () => {
+    try {
+      const pending = await listOfflineExpenses();
+      setPendingOfflineCount(pending.length);
+    } catch {
+      // ignore IndexedDB unavailability
+    }
+  }, []);
+
+  const refreshGeminiHealth = useCallback(async () => {
+    setCheckingGeminiHealth(true);
+    try {
+      const { apiKey } = getEffectiveGeminiApiKey();
+      const status = await checkGeminiApiHealth(apiKey);
+      setGeminiHealth(status);
+    } finally {
+      setCheckingGeminiHealth(false);
+    }
+  }, []);
 
   const handleSetViewMode = (mode: ViewMode) => {
     setViewMode(mode);
@@ -151,10 +201,25 @@ export default function App() {
         setSyncSource(bundle.source);
       } finally {
         setSyncing(false);
+        void refreshGeminiHealth();
+        void refreshOfflineCount();
       }
     },
-    [handleLogout]
+    [handleLogout, refreshGeminiHealth, refreshOfflineCount]
   );
+
+  const handleFlushOfflineQueue = useCallback(async () => {
+    setSyncingOfflineQueue(true);
+    try {
+      const res = await syncPendingOfflineExpenses();
+      setPendingOfflineCount(res.remainingCount);
+      if (res.syncedCount > 0 && user) {
+        await loadBackendData(user);
+      }
+    } finally {
+      setSyncingOfflineQueue(false);
+    }
+  }, [loadBackendData, user]);
 
   useEffect(() => {
     if (user) {
@@ -163,10 +228,23 @@ export default function App() {
   }, [user, loadBackendData]);
 
   useEffect(() => {
-    if (!isManager && (activeTab === 'dashboard' || activeTab === 'config')) {
+    if (!user) return;
+    const onOnline = () => {
+      void handleFlushOfflineQueue();
+    };
+    window.addEventListener('online', onOnline);
+    void refreshOfflineCount();
+    return () => window.removeEventListener('online', onOnline);
+  }, [user, handleFlushOfflineQueue, refreshOfflineCount]);
+
+  useEffect(() => {
+    if (
+      (!isManager && (activeTab === 'dashboard' || activeTab === 'config')) ||
+      (!canSeeBudget && activeTab === 'budget')
+    ) {
       setActiveTab('scanner');
     }
-  }, [isManager, activeTab]);
+  }, [isManager, canSeeBudget, activeTab]);
 
   const handleLoginSuccess = (session: UserSession, remember: boolean) => {
     const { clave: _omitClave, ...safeSession } = session;
@@ -321,17 +399,19 @@ export default function App() {
               >
                 3. Buscador RUC
               </button>
-              <button
-                type="button"
-                onClick={() => setActiveTab('budget')}
-                className={`px-3 py-1.5 text-sm font-medium rounded-lg whitespace-nowrap shrink-0 transition-colors cursor-pointer ${
-                  activeTab === 'budget'
-                    ? 'bg-[#59B447] text-white'
-                    : 'text-emerald-100 hover:text-white hover:bg-white/10'
-                }`}
-              >
-                4. Presupuesto
-              </button>
+              {canSeeBudget && (
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('budget')}
+                  className={`px-3 py-1.5 text-sm font-medium rounded-lg whitespace-nowrap shrink-0 transition-colors cursor-pointer ${
+                    activeTab === 'budget'
+                      ? 'bg-[#59B447] text-white'
+                      : 'text-emerald-100 hover:text-white hover:bg-white/10'
+                  }`}
+                >
+                  4. Presupuesto
+                </button>
+              )}
               {isManager && (
                 <button
                   type="button"
@@ -425,21 +505,103 @@ export default function App() {
             </span>
           </div>
 
-          <button
-            type="button"
-            disabled={syncing}
-            onClick={() => loadBackendData(user)}
-            className="text-xs font-medium text-[#1B4332] hover:text-[#59B447] flex items-center gap-1.5 cursor-pointer disabled:opacity-60"
-          >
-            <RefreshCw className={`w-3.5 h-3.5 ${syncing ? 'animate-spin' : ''}`} />
-            <span>
-              {syncing
-                ? 'Sincronizando con Servidor...'
-                : syncSource === 'live'
-                ? 'Sincronizado con Servidor'
-                : 'Sincronizar con Servidor'}
+          <div className="flex items-center gap-2 flex-wrap">
+            {/* Live Connection Indicators: Servidor + Gemini IA + Offline Queue */}
+            <span
+              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md font-medium border ${
+                syncSource === 'live'
+                  ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                  : 'bg-amber-50 text-amber-800 border-amber-200'
+              }`}
+              title={
+                syncSource === 'live'
+                  ? 'Conectado en vivo con Google Apps Script'
+                  : 'Trabajando con caché local offline'
+              }
+            >
+              {syncSource === 'live' ? (
+                <Wifi className="w-3 h-3 text-emerald-600" />
+              ) : (
+                <WifiOff className="w-3 h-3 text-amber-600" />
+              )}
+              <span>{syncSource === 'live' ? 'Servidor Online' : 'Caché Offline'}</span>
             </span>
-          </button>
+
+            <button
+              type="button"
+              onClick={() => refreshGeminiHealth()}
+              disabled={checkingGeminiHealth}
+              title={geminiHealth.message}
+              aria-label="Estado de conexión con Gemini IA"
+              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md font-medium border cursor-pointer transition-colors ${
+                checkingGeminiHealth
+                  ? 'bg-slate-50 text-slate-600 border-slate-200'
+                  : geminiHealth.status === 'connected'
+                  ? 'bg-emerald-50 text-emerald-800 border-emerald-200 hover:bg-emerald-100'
+                  : geminiHealth.status === 'error'
+                  ? 'bg-red-50 text-red-800 border-red-200 hover:bg-red-100'
+                  : 'bg-amber-50 text-amber-800 border-amber-200 hover:bg-amber-100'
+              }`}
+            >
+              {checkingGeminiHealth ? (
+                <Loader2 className="w-3 h-3 animate-spin" />
+              ) : (
+                <Sparkles
+                  className={`w-3 h-3 ${
+                    geminiHealth.status === 'connected'
+                      ? 'text-emerald-600'
+                      : geminiHealth.status === 'error'
+                      ? 'text-red-600'
+                      : 'text-amber-600'
+                  }`}
+                />
+              )}
+              <span>
+                {checkingGeminiHealth
+                  ? 'Probando IA...'
+                  : geminiHealth.status === 'connected'
+                  ? `IA Conectada (${geminiHealth.model || 'Gemini'})`
+                  : geminiHealth.status === 'error'
+                  ? 'IA Error (Reintentar)'
+                  : 'IA Sin clave'}
+              </span>
+            </button>
+
+            {pendingOfflineCount > 0 && (
+              <button
+                type="button"
+                disabled={syncingOfflineQueue}
+                onClick={handleFlushOfflineQueue}
+                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md font-semibold bg-amber-100 hover:bg-amber-200 text-amber-900 border border-amber-300 cursor-pointer"
+                title="Sincronizar comprobantes guardados sin conexión en IndexedDB"
+              >
+                <CloudUpload className="w-3 h-3" />
+                <span>
+                  {syncingOfflineQueue
+                    ? 'Subiendo...'
+                    : `${pendingOfflineCount} pendiente${
+                        pendingOfflineCount === 1 ? '' : 's'
+                      } offline`}
+                </span>
+              </button>
+            )}
+
+            <button
+              type="button"
+              disabled={syncing}
+              onClick={() => loadBackendData(user)}
+              className="text-xs font-medium text-[#1B4332] hover:text-[#59B447] flex items-center gap-1.5 cursor-pointer disabled:opacity-60"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${syncing ? 'animate-spin' : ''}`} />
+              <span>
+                {syncing
+                  ? 'Sincronizando...'
+                  : syncSource === 'live'
+                  ? 'Sincronizado'
+                  : 'Sincronizar'}
+              </span>
+            </button>
+          </div>
         </div>
       </div>
 
@@ -456,6 +618,10 @@ export default function App() {
             criteria={criteria}
             existingExpenses={visibleExpenses}
             isMobileMode={isMobileMode}
+            geminiHealth={geminiHealth}
+            onRefreshGeminiHealth={refreshGeminiHealth}
+            pendingOfflineCount={pendingOfflineCount}
+            onPendingQueueChanged={refreshOfflineCount}
             onExpenseCreated={handleExpenseCreated}
           />
         )}
@@ -483,7 +649,7 @@ export default function App() {
             onImportCsvRecords={handleImportCsvRecords}
           />
         )}
-        {activeTab === 'budget' && (
+        {activeTab === 'budget' && canSeeBudget && (
           <BudgetTab
             user={user}
             usersDirectory={usersDirectory}
@@ -514,6 +680,8 @@ export default function App() {
             criteria={criteria}
             expenses={visibleExpenses}
             sedes={sedes}
+            geminiHealth={geminiHealth}
+            onGeminiHealthUpdated={refreshGeminiHealth}
             onCriterionMoved={handleCriterionMoved}
             onCriterionSaved={handleCriterionSaved}
             onCriterionRemoved={handleCriterionRemoved}
@@ -548,7 +716,7 @@ export default function App() {
         <div
           className={`${
             isMobileMode ? 'max-w-lg mx-auto' : ''
-          } grid ${isManager ? 'grid-cols-6' : 'grid-cols-4'} h-16`}
+          } grid ${mobileGridClass} h-16`}
         >
           <button
             type="button"
@@ -580,16 +748,18 @@ export default function App() {
             <Search className="w-4 h-4" />
             <span>Buscador</span>
           </button>
-          <button
-            type="button"
-            onClick={() => setActiveTab('budget')}
-            className={`flex flex-col items-center justify-center gap-1 text-[10px] sm:text-[11px] font-semibold cursor-pointer ${
-              activeTab === 'budget' ? 'text-[#1B4332] bg-emerald-50/70' : 'text-slate-500'
-            }`}
-          >
-            <Wallet className="w-4 h-4" />
-            <span>Presup.</span>
-          </button>
+          {canSeeBudget && (
+            <button
+              type="button"
+              onClick={() => setActiveTab('budget')}
+              className={`flex flex-col items-center justify-center gap-1 text-[10px] sm:text-[11px] font-semibold cursor-pointer ${
+                activeTab === 'budget' ? 'text-[#1B4332] bg-emerald-50/70' : 'text-slate-500'
+              }`}
+            >
+              <Wallet className="w-4 h-4" />
+              <span>Presup.</span>
+            </button>
+          )}
           {isManager && (
             <button
               type="button"

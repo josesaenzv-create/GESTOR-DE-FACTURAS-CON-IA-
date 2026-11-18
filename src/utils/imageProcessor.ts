@@ -27,16 +27,29 @@ export interface ProcessedInvoiceImages {
   hdBase64: string;
   iaDataUrl: string;
   iaBase64: string;
+  ocrDataUrl: string;
   width: number;
   height: number;
 }
 
-export function loadImageFromSrc(src: string): Promise<HTMLImageElement> {
+export async function loadImageFromSrc(src: string): Promise<HTMLImageElement> {
+  const img = new Image();
+  img.src = src;
+  if (typeof img.decode === 'function') {
+    try {
+      await img.decode();
+      return img;
+    } catch {
+      // Fallback to onload below
+    }
+  }
   return new Promise((resolve, reject) => {
-    const img = new Image();
+    if (img.complete && (img.naturalWidth > 0 || img.width > 0)) {
+      resolve(img);
+      return;
+    }
     img.onload = () => resolve(img);
     img.onerror = () => reject(new Error('No se pudo cargar la imagen.'));
-    img.src = src;
   });
 }
 
@@ -221,21 +234,31 @@ export async function processEditedInvoiceImage(
   };
   const ia = renderEditedToCanvas(img, iaEdits, 2048, 0.92);
 
+  const ocrEdits: ImageEditSettings = {
+    ...edits,
+    filterMode: 'grayscale',
+    brightness: Math.max(96, Math.min(115, edits.brightness)),
+    contrast: Math.max(112, Math.min(132, edits.contrast)),
+  };
+  const ocr = renderEditedToCanvas(img, ocrEdits, 1800, 0.94);
+
   return {
     originalDataUrl,
     hdDataUrl: hd.dataUrl,
     hdBase64: hd.base64,
     iaDataUrl: ia.dataUrl,
     iaBase64: ia.base64,
+    ocrDataUrl: ocr.dataUrl,
     width: hd.width,
     height: hd.height,
   };
 }
 
 /**
- * Normalizes EXIF camera orientation from mobile phones or gallery images into an upright JPEG data URL:
- * 1. Tries createImageBitmap (fast, respects EXIF 'from-image' orientation without double rotation)
- * 2. Falls back to URL.createObjectURL + <img> -> canvas (avoids giant base64 FileReader memory spikes and missing MIME issues)
+ * Normalizes EXIF camera orientation from mobile phones or gallery images into an upright JPEG data URL
+ * without OOM crashes:
+ * 1. Primary OOM-safe path: URL.createObjectURL(file) + await img.decode() inside try/finally revokeObjectURL
+ * 2. Secondary path: createImageBitmap fallback
  * 3. Final fallback to FileReader data URL
  */
 async function normalizeExifFileToDataUrl(file: File): Promise<string> {
@@ -249,7 +272,7 @@ async function normalizeExifFileToDataUrl(file: File): Promise<string> {
     srcH: number
   ): string | null => {
     if (!srcW || !srcH || typeof document === 'undefined') return null;
-    const maxInitial = 2800;
+    const maxInitial = 2600;
     const ratio = Math.min(1, maxInitial / Math.max(srcW, srcH));
     const w = Math.max(1, Math.round(srcW * ratio));
     const h = Math.max(1, Math.round(srcH * ratio));
@@ -263,8 +286,25 @@ async function normalizeExifFileToDataUrl(file: File): Promise<string> {
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(0, 0, w, h);
     ctx.drawImage(source, 0, 0, w, h);
-    return canvas.toDataURL('image/jpeg', 0.95);
+    return canvas.toDataURL('image/jpeg', 0.94);
   };
+
+  if (typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function' && typeof document !== 'undefined') {
+    const objectUrl = URL.createObjectURL(file);
+    try {
+      const img = await loadImageFromSrc(objectUrl);
+      const result = drawSourceToJpegDataUrl(
+        img,
+        img.naturalWidth || img.width,
+        img.naturalHeight || img.height
+      );
+      if (result) return result;
+    } catch {
+      // Fallback to createImageBitmap / FileReader below
+    } finally {
+      URL.revokeObjectURL(objectUrl);
+    }
+  }
 
   if (typeof createImageBitmap === 'function' && typeof document !== 'undefined') {
     try {
@@ -276,24 +316,7 @@ async function normalizeExifFileToDataUrl(file: File): Promise<string> {
         bitmap.close?.();
       }
     } catch {
-      // Fallback to ObjectURL below
-    }
-  }
-
-  if (typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function') {
-    const objectUrl = URL.createObjectURL(file);
-    try {
-      const img = await loadImageFromSrc(objectUrl);
-      const result = drawSourceToJpegDataUrl(
-        img,
-        img.naturalWidth || img.width,
-        img.naturalHeight || img.height
-      );
-      if (result) return result;
-    } catch {
       // Fallback to FileReader below
-    } finally {
-      URL.revokeObjectURL(objectUrl);
     }
   }
 

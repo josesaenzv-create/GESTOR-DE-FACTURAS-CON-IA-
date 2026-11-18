@@ -7,7 +7,7 @@ import {
   type SedeRecord,
   type UserSession,
 } from '../types/crediban';
-import { isManagerUser, round2 } from './accounting';
+import { isAdminOrManagerUser, round2 } from './accounting';
 
 export function buildBudgetKey(sede: string, anio: string, mes: string): string {
   return `${String(sede || '').trim().toUpperCase()}::${String(anio || '').trim()}::${String(
@@ -54,7 +54,7 @@ export function createDefaultBudgetFromSede(
     presupuestoFijoTotal: round2(Number(sede?.presupuestoMensualFijo ?? 5000) || 0),
     presupuestoVariableTotal: round2(Number(sede?.presupuestoMensualVariable ?? 4000) || 0),
     partidas: [],
-    visibilidadPorDefecto: 'ALL',
+    visibilidadPorDefecto: 'HIDDEN',
     visibilidadPorUsuario: {},
     notasGerencia: '',
   };
@@ -91,12 +91,24 @@ export function resolveUserBudgetVisibility(
   user: UserSession | null
 ): BudgetVisibilityMode {
   if (!user) return 'HIDDEN';
-  if (isManagerUser(user)) return 'ALL';
+  if (isAdminOrManagerUser(user)) return 'ALL';
   const key = String(user.usuario || '').trim().toUpperCase();
   if (budget.visibilidadPorUsuario && budget.visibilidadPorUsuario[key]) {
     return budget.visibilidadPorUsuario[key];
   }
-  return budget.visibilidadPorDefecto || 'ALL';
+  return budget.visibilidadPorDefecto || 'HIDDEN';
+}
+
+export function canUserAccessBudgetTab(
+  user: UserSession | null,
+  budgets: MonthlySedeBudget[]
+): boolean {
+  if (!user) return false;
+  if (isAdminOrManagerUser(user)) return true;
+  const userSede = String(user.sede || '').trim().toUpperCase();
+  return budgets
+    .filter((b) => String(b.sede || '').trim().toUpperCase() === userSede)
+    .some((b) => resolveUserBudgetVisibility(b, user) !== 'HIDDEN');
 }
 
 export interface PartidaExecutionRow {

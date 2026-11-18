@@ -129,6 +129,17 @@ export function isManagerUser(user: UserSession | null): boolean {
 }
 
 /**
+ * Gerentes y Administradores de sede tienen acceso por defecto al módulo de Presupuestos.
+ * Los Cajeros, Asesores y demás cargos requieren habilitación explícita de Gerencia.
+ */
+export function isAdminOrManagerUser(user: UserSession | null): boolean {
+  if (!user) return false;
+  if (isManagerUser(user)) return true;
+  const cargo = String(user.cargo || '').toUpperCase();
+  return cargo.includes('ADMINISTRADOR') || cargo.includes('ADMINISTRADORA');
+}
+
+/**
  * Política de acceso por defecto:
  * Solo Cajeros, Administradores y Gerencia tienen acceso directo al sistema.
  * Los Asesores y demás cargos están bloqueados por defecto salvo habilitación explícita de Gerencia.

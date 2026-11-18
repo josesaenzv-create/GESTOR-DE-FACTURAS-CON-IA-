@@ -210,7 +210,7 @@ test('getEffectiveGeminiApiKey resolves server-synced key cleanly and targets ge
     assert.equal(fromOverride.source, 'localStorage');
     assert.equal(fromOverride.apiKey, overrideKey);
 
-    assert.equal(GEMINI_MODEL_ID, 'gemini-flash-latest');
+    assert.equal(GEMINI_MODEL_ID, 'gemini-flash-lite-latest');
   } finally {
     if (originalStorage === undefined) {
       delete (globalThis as { localStorage?: unknown }).localStorage;
@@ -218,4 +218,12 @@ test('getEffectiveGeminiApiKey resolves server-synced key cleanly and targets ge
       (globalThis as { localStorage?: Storage }).localStorage = originalStorage;
     }
   }
+});
+
+test('GEMINI_CANDIDATE_MODELS maintains reliable fallback cascade order', async () => {
+  const mod = await import('./geminiVision');
+  assert.ok(Array.isArray(mod.GEMINI_CANDIDATE_MODELS));
+  assert.equal(mod.GEMINI_CANDIDATE_MODELS[0], 'gemini-flash-lite-latest');
+  assert.ok(mod.GEMINI_CANDIDATE_MODELS.includes('gemini-3-flash-preview'));
+  assert.ok(mod.GEMINI_CANDIDATE_MODELS.includes('gemini-flash-latest'));
 });

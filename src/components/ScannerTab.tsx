@@ -47,8 +47,15 @@ import {
   type ImageFilterMode,
   type ProcessedInvoiceImages,
 } from '../utils/imageProcessor';
-import { GEMINI_MATH_ALERT_TEXT } from '../utils/geminiVision';
-import { saveExpenseToBackend, scanInvoiceWithGeminiApi } from '../services/credibanApi';
+import {
+  GEMINI_MATH_ALERT_TEXT,
+  type GeminiApiHealthStatus,
+} from '../utils/geminiVision';
+import {
+  saveExpenseToBackend,
+  scanInvoiceWithGeminiApi,
+  type ScanEngineLabel,
+} from '../services/credibanApi';
 
 interface ScannerTabProps {
   user: UserSession;
@@ -56,6 +63,10 @@ interface ScannerTabProps {
   criteria: ExpenseCriterion[];
   existingExpenses: ExpenseRecord[];
   isMobileMode?: boolean;
+  geminiHealth?: GeminiApiHealthStatus;
+  onRefreshGeminiHealth?: () => void;
+  pendingOfflineCount?: number;
+  onPendingQueueChanged?: () => void;
   onExpenseCreated: (record: ExpenseRecord) => void;
 }
 
@@ -65,11 +76,16 @@ export const ScannerTab: React.FC<ScannerTabProps> = ({
   criteria,
   existingExpenses,
   isMobileMode = false,
+  geminiHealth,
+  onRefreshGeminiHealth,
+  pendingOfflineCount = 0,
+  onPendingQueueChanged,
   onExpenseCreated,
 }) => {
   const isManager = isManagerUser(user);
   const cameraInputRef = useRef<HTMLInputElement>(null);
   const galleryInputRef = useRef<HTMLInputElement>(null);
+  const scanRequestIdRef = useRef<number>(0);
 
   const todayIso = new Date().toISOString().slice(0, 10);
 
@@ -89,7 +105,10 @@ export const ScannerTab: React.FC<ScannerTabProps> = ({
   const [scanProgress, setScanProgress] = useState<{ pct: number; step: string } | null>(null);
   const [aiMessage, setAiMessage] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
   const [aiScore, setAiScore] = useState<number | null>(null);
-  const [aiEngineUsed, setAiEngineUsed] = useState<'gemini' | 'ocr-local' | null>(null);
+  const [aiEngineUsed, setAiEngineUsed] = useState<ScanEngineLabel | null>(null);
+  const [qrVerifiedScan, setQrVerifiedScan] = useState(false);
+  const [escalatedFromPct, setEscalatedFromPct] = useState<number | undefined>(undefined);
+  const [geminiWarning, setGeminiWarning] = useState<string | null>(null);
   const [aiMathVerified, setAiMathVerified] = useState<boolean>(true);
   const [aiMathAlert, setAiMathAlert] = useState<string | null>(null);
   const [secondPassTriggered, setSecondPassTriggered] = useState(false);
@@ -199,11 +218,29 @@ export const ScannerTab: React.FC<ScannerTabProps> = ({
   const impactLevel = getImpactLevel(numericTotal);
 
   const processSelectedFile = async (file: File) => {
+    const reqId = ++scanRequestIdRef.current;
     setAiMessage(null);
     setGeminiError(null);
+    setGeminiWarning(null);
     setAiMathAlert(null);
+    setQrVerifiedScan(false);
+    setEscalatedFromPct(undefined);
     setSecondPassTriggered(false);
+    setAiScore(null);
+    setAiEngineUsed(null);
     setSaveFeedback(null);
+    // Clear any previously scanned receipt fields so stale values never bleed across uploads
+    setNumeroComprobante('');
+    setRuc('');
+    setRazonSocial('');
+    setNombreComercial('');
+    setTitularCuenta('');
+    setNumeroOperacion('');
+    setTelefonoCuenta('');
+    setTotalStr('');
+    setSubtotalStr('');
+    setIgvStr('');
+    setDescripcion('');
     setEdits(DEFAULT_IMAGE_EDITS);
     setLivePreview(null);
     setCompareOriginal(false);
@@ -211,15 +248,23 @@ export const ScannerTab: React.FC<ScannerTabProps> = ({
     setScanProgress({ pct: 10, step: 'Corrigiendo orientación y optimizando imagen (2048px)...' });
     try {
       const processed = await processInvoiceImageFile(file);
+      if (scanRequestIdRef.current !== reqId) return;
       setImages(processed);
       setLivePreview({
         dataUrl: processed.hdDataUrl,
         hdWidth: processed.width,
         hdHeight: processed.height,
       });
-      setShowEditor(true); // Immediately allow cropping/filters while Gemini analyzes
-      await runGeminiAnalysis(processed.iaBase64, processed.iaDataUrl, false);
+      setShowEditor(true); // Immediately allow cropping/filters while reading
+      await runGeminiAnalysis(
+        processed.iaBase64,
+        processed.iaDataUrl,
+        'hybrid',
+        processed.ocrDataUrl,
+        reqId
+      );
     } catch (err) {
+      if (scanRequestIdRef.current !== reqId) return;
       setScanningAi(false);
       setScanProgress(null);
       setGeminiError({
@@ -251,89 +296,121 @@ export const ScannerTab: React.FC<ScannerTabProps> = ({
   const runGeminiAnalysis = async (
     base64ToScan?: string,
     dataUrlToScan?: string,
-    forceOfflineOcr = false
+    mode: 'hybrid' | 'force-offline' | 'force-gemini' = 'hybrid',
+    ocrDataUrlOverride?: string,
+    existingRequestId?: number
   ) => {
     const targetBase64 = base64ToScan || images?.iaBase64;
     const targetDataUrl = dataUrlToScan || images?.iaDataUrl;
+    const targetOcrUrl = ocrDataUrlOverride || images?.ocrDataUrl || targetDataUrl;
     if (!targetBase64) return;
+    const reqId =
+      existingRequestId !== undefined ? existingRequestId : ++scanRequestIdRef.current;
     setScanningAi(true);
     setScanProgress({
-      pct: 14,
-      step: forceOfflineOcr
-        ? 'Iniciando OCR de emergencia sin internet...'
-        : 'Preparando lectura de alta precisión con Gemini Flash IA...',
+      pct: 12,
+      step:
+        mode === 'force-gemini'
+          ? 'Enviando comprobante a Gemini Flash IA (Alta Precisión)...'
+          : mode === 'force-offline'
+          ? 'Iniciando OCR Offline (QR SUNAT + Espacial)...'
+          : 'Iniciando motor Híbrido (QR SUNAT + OCR Offline >=95% -> IA)...',
     });
     setAiMessage(null);
     setGeminiError(null);
+    setGeminiWarning(null);
     setAiMathAlert(null);
 
     try {
-      const { result, engine } = await scanInvoiceWithGeminiApi({
-        imageBase64: targetBase64,
-        imageDataUrl: targetDataUrl,
-        mimeType: 'image/jpeg',
-        criteria,
-        expectedTipo: tipoComprobante,
-        forceOfflineOcr,
-        onProgress: (pct, step) => {
-          setScanProgress({ pct, step });
-        },
-      });
+      const { result, engine, qrVerified, escalatedFromOfflinePct, geminiWarning: warnMsg } =
+        await scanInvoiceWithGeminiApi({
+          imageBase64: targetBase64,
+          imageDataUrl: targetDataUrl,
+          ocrDataUrl: targetOcrUrl,
+          mimeType: 'image/jpeg',
+          criteria,
+          expectedTipo: tipoComprobante,
+          mode,
+          onProgress: (pct, step) => {
+            if (scanRequestIdRef.current !== reqId) return;
+            setScanProgress({ pct, step });
+          },
+        });
+
+      if (scanRequestIdRef.current !== reqId) return;
 
       const nextTipo = (result.tipoComprobante || tipoComprobante || 'FACTURA') as TipoComprobante;
       setTipoComprobante(nextTipo);
-      if (result.numeroComprobante) setNumeroComprobante(result.numeroComprobante);
+      setNumeroComprobante(result.numeroComprobante || '');
       if (result.fechaEmision) {
         setFechaEmision(result.fechaEmision);
         setAnio(getYearFromIsoDate(result.fechaEmision));
         setMes(getMonthNameFromIsoDate(result.fechaEmision));
       }
-      if (result.ruc) setRuc(result.ruc.replace(/\D/g, ''));
-      if (result.razonSocial) setRazonSocial(result.razonSocial);
-      if (result.nombreComercial) setNombreComercial(result.nombreComercial);
-      if (result.titularCuenta) setTitularCuenta(result.titularCuenta);
-      if (result.numeroOperacion) setNumeroOperacion(result.numeroOperacion);
-      if (result.entidadPago) setEntidadPago(result.entidadPago);
-      if (result.telefonoCuenta) setTelefonoCuenta(result.telefonoCuenta);
+      setRuc((result.ruc || '').replace(/\D/g, ''));
+      setRazonSocial(result.razonSocial || '');
+      setNombreComercial(result.nombreComercial || '');
+      setTitularCuenta(result.titularCuenta || '');
+      setNumeroOperacion(result.numeroOperacion || '');
+      setEntidadPago(result.entidadPago || entidadPago);
+      setTelefonoCuenta(result.telefonoCuenta || '');
       if (result.total > 0) {
         setTotalStr(result.total.toFixed(2));
         setSubtotalStr(result.subtotal.toFixed(2));
         setIgvStr(result.igv.toFixed(2));
+      } else {
+        setTotalStr('');
+        setSubtotalStr('');
+        setIgvStr('');
       }
       if (result.naturaleza) setNaturaleza(result.naturaleza);
       if (result.categoria) setCategoriaForms(result.categoria);
       if (result.subtipo) setSubtipo(result.subtipo);
-      if (result.descripcion) setDescripcion(result.descripcion);
+      setDescripcion(result.descripcion || '');
 
       const confPct =
         result.confianzaLectura ?? Math.round((result.scoreConfiabilidad || 0.85) * 100);
       setAiScore(confPct / 100);
       setAiEngineUsed(engine);
+      setQrVerifiedScan(Boolean(qrVerified));
+      setEscalatedFromPct(escalatedFromOfflinePct);
+      setGeminiWarning(warnMsg || null);
       setAiMathVerified(result.mathVerified ?? true);
       setAiMathAlert(result.mathAlert || null);
       setSecondPassTriggered(Boolean(result.secondPassTriggered));
 
+      const summaryText =
+        engine === 'ocr-verified'
+          ? qrVerified
+            ? `QR SUNAT + OCR Offline verificados (${confPct}% >= 95%). Sin necesidad de consumir cuota IA.`
+            : `OCR Espacial Offline verificado (${confPct}% >= 95%, cuadre exacto).`
+          : engine === 'gemini'
+          ? `Lectura Gemini Flash IA completada (Confianza ${confPct}%${
+              escalatedFromOfflinePct !== undefined
+                ? ` · Escalado desde OCR ${escalatedFromOfflinePct}%`
+                : ''
+            }${result.secondPassTriggered ? ' · Doble verificación aplicada' : ''}).`
+          : `Borrador OCR Offline completado (${confPct}%). Revisa los campos o presiona "Verificar con IA".`;
+
       setAiMessage({
-        type: 'ok',
-        text:
-          engine === 'gemini'
-            ? `Lectura Gemini Flash IA completada (Confianza ${confPct}%${
-                result.secondPassTriggered ? ' · Doble verificación aplicada' : ''
-              }). Verifica los campos antes de guardar.`
-            : `Lectura OCR de emergencia sin internet completada (${confPct}%). Revisa cuidadosamente los montos y serie.`,
+        type: engine === 'ocr-local' ? 'err' : 'ok',
+        text: summaryText,
       });
     } catch (err) {
+      if (scanRequestIdRef.current !== reqId) return;
       const exactMessage =
         err instanceof Error
           ? err.message
           : 'Error al consultar la API de Gemini.';
       setGeminiError({
         message: exactMessage,
-        canUseOfflineFallback: !forceOfflineOcr,
+        canUseOfflineFallback: mode !== 'force-offline',
       });
     } finally {
-      setScanningAi(false);
-      setScanProgress(null);
+      if (scanRequestIdRef.current === reqId) {
+        setScanningAi(false);
+        setScanProgress(null);
+      }
     }
   };
 
@@ -389,7 +466,12 @@ export const ScannerTab: React.FC<ScannerTabProps> = ({
         hdHeight: updated.height,
       });
       if (andRescan) {
-        await runGeminiAnalysis(updated.iaBase64, updated.iaDataUrl);
+        await runGeminiAnalysis(
+          updated.iaBase64,
+          updated.iaDataUrl,
+          'hybrid',
+          updated.ocrDataUrl
+        );
       }
     } finally {
       setApplyingEdit(false);
@@ -493,6 +575,7 @@ export const ScannerTab: React.FC<ScannerTabProps> = ({
 
       const res = await saveExpenseToBackend(record, images?.hdBase64, filename);
       onExpenseCreated(res.savedRecord);
+      onPendingQueueChanged?.();
 
       setSaveFeedback({
         type: 'ok',
@@ -521,6 +604,9 @@ export const ScannerTab: React.FC<ScannerTabProps> = ({
       setDescripcion('');
       setAiScore(null);
       setAiEngineUsed(null);
+      setQrVerifiedScan(false);
+      setEscalatedFromPct(undefined);
+      setGeminiWarning(null);
       setAiMathVerified(true);
       setAiMathAlert(null);
       setSecondPassTriggered(false);
@@ -566,9 +652,40 @@ export const ScannerTab: React.FC<ScannerTabProps> = ({
       <div className="bg-white rounded-xl border border-slate-200 p-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div>
-            <h2 className="text-sm font-bold text-slate-900">¿Qué vas a registrar?</h2>
-            <p className="text-xs text-slate-500">
-              Selecciona primero el tipo de documento o captura; el formulario se adaptará automáticamente.
+            <div className="flex flex-wrap items-center gap-2">
+              <h2 className="text-sm font-bold text-slate-900">¿Qué vas a registrar?</h2>
+              {geminiHealth && (
+                <button
+                  type="button"
+                  onClick={() => onRefreshGeminiHealth?.()}
+                  title={geminiHealth.message}
+                  className={`inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-semibold rounded border cursor-pointer ${
+                    geminiHealth.status === 'connected'
+                      ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                      : geminiHealth.status === 'error'
+                      ? 'bg-red-50 text-red-800 border-red-200'
+                      : 'bg-amber-50 text-amber-800 border-amber-200'
+                  }`}
+                >
+                  <Sparkles className="w-3 h-3" />
+                  <span>
+                    {geminiHealth.status === 'connected'
+                      ? `Híbrido: OCR 95%+ · IA (${geminiHealth.model || 'Gemini'})`
+                      : geminiHealth.status === 'error'
+                      ? 'OCR Offline activo · IA con error'
+                      : 'Modo OCR Offline (IA sin clave)'}
+                  </span>
+                </button>
+              )}
+              {pendingOfflineCount > 0 && (
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-semibold rounded bg-amber-100 text-amber-900 border border-amber-300">
+                  <WifiOff className="w-3 h-3" />
+                  <span>{pendingOfflineCount} en cola offline</span>
+                </span>
+              )}
+            </div>
+            <p className="text-xs text-slate-500 mt-0.5">
+              El escáner intenta primero QR SUNAT + OCR Espacial offline (≥95% exacto) y escala automáticamente a Gemini IA cuando se necesita.
             </p>
           </div>
           <div className="sm:w-72 shrink-0">
@@ -737,7 +854,7 @@ export const ScannerTab: React.FC<ScannerTabProps> = ({
                   <span className="text-xs text-slate-600 font-mono tabular-nums">
                     HD {livePreview?.hdWidth || images.width}×{livePreview?.hdHeight || images.height}px
                   </span>
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-1.5">
                     <button
                       type="button"
                       onClick={() => setShowEditor((prev) => !prev)}
@@ -748,20 +865,40 @@ export const ScannerTab: React.FC<ScannerTabProps> = ({
                       }`}
                     >
                       <SlidersHorizontal className="w-3.5 h-3.5" />
-                      <span>{showEditor ? 'Ocultar Editor' : 'Recortar / Filtros'}</span>
+                      <span>{showEditor ? 'Ocultar Editor' : 'Editor'}</span>
                     </button>
                     <button
                       type="button"
                       disabled={scanningAi}
-                      onClick={() => runGeminiAnalysis()}
-                      className="px-3 py-1.5 bg-[#59B447] hover:bg-[#4ca13b] disabled:opacity-60 text-white text-xs font-semibold rounded-md flex items-center gap-1.5 cursor-pointer"
+                      onClick={() => runGeminiAnalysis(undefined, undefined, 'force-offline')}
+                      className="px-2.5 py-1.5 bg-slate-100 hover:bg-slate-200 disabled:opacity-60 text-slate-800 text-xs font-semibold rounded-md flex items-center gap-1 cursor-pointer"
+                      title="Ejecutar únicamente lector QR SUNAT + OCR Offline"
+                    >
+                      <WifiOff className="w-3.5 h-3.5 text-slate-600" />
+                      <span>Solo OCR</span>
+                    </button>
+                    <button
+                      type="button"
+                      disabled={scanningAi}
+                      onClick={() => runGeminiAnalysis(undefined, undefined, 'force-gemini')}
+                      className="px-2.5 py-1.5 bg-[#1B4332] hover:bg-[#0f291e] disabled:opacity-60 text-white text-xs font-semibold rounded-md flex items-center gap-1 cursor-pointer"
+                      title="Forzar verificación completa con Gemini Flash IA"
                     >
                       {scanningAi ? (
                         <Loader2 className="w-3.5 h-3.5 animate-spin" />
                       ) : (
                         <Sparkles className="w-3.5 h-3.5" />
                       )}
-                      <span>{scanningAi ? 'Analizando...' : 'Re-escanear'}</span>
+                      <span>Verificar IA</span>
+                    </button>
+                    <button
+                      type="button"
+                      disabled={scanningAi}
+                      onClick={() => runGeminiAnalysis(undefined, undefined, 'hybrid')}
+                      className="px-2.5 py-1.5 bg-[#59B447] hover:bg-[#4ca13b] disabled:opacity-60 text-white text-xs font-semibold rounded-md flex items-center gap-1 cursor-pointer"
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 ${scanningAi ? 'animate-spin' : ''}`} />
+                      <span>{scanningAi ? 'Leyendo...' : 'Re-escanear'}</span>
                     </button>
                   </div>
                 </div>
@@ -984,7 +1121,7 @@ export const ScannerTab: React.FC<ScannerTabProps> = ({
                 <button
                   type="button"
                   disabled={scanningAi}
-                  onClick={() => runGeminiAnalysis(undefined, undefined, false)}
+                  onClick={() => runGeminiAnalysis(undefined, undefined, 'force-gemini')}
                   className="px-3 py-1.5 bg-[#1B4332] hover:bg-[#0f291e] text-white font-semibold rounded-lg flex items-center gap-1.5 cursor-pointer"
                 >
                   <RefreshCw className="w-3.5 h-3.5" />
@@ -994,14 +1131,37 @@ export const ScannerTab: React.FC<ScannerTabProps> = ({
                   <button
                     type="button"
                     disabled={scanningAi}
-                    onClick={() => runGeminiAnalysis(undefined, undefined, true)}
+                    onClick={() => runGeminiAnalysis(undefined, undefined, 'force-offline')}
                     className="px-3 py-1.5 bg-amber-100 hover:bg-amber-200 border border-amber-300 text-amber-950 font-semibold rounded-lg flex items-center gap-1.5 cursor-pointer"
                   >
                     <WifiOff className="w-3.5 h-3.5" />
-                    <span>Usar OCR de emergencia sin internet</span>
+                    <span>Usar OCR offline</span>
                   </button>
                 )}
               </div>
+            </div>
+          )}
+
+          {geminiWarning && (
+            <div
+              role="alert"
+              className="mt-3 p-3 rounded-lg border bg-amber-50 border-amber-300 text-xs text-amber-950 space-y-2"
+            >
+              <div className="flex items-start gap-2">
+                <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-amber-600" />
+                <span className="break-words">
+                  <strong>Aviso IA (se conservó el borrador OCR offline):</strong> {geminiWarning}
+                </span>
+              </div>
+              <button
+                type="button"
+                disabled={scanningAi}
+                onClick={() => runGeminiAnalysis(undefined, undefined, 'force-gemini')}
+                className="px-2.5 py-1 bg-amber-200/80 hover:bg-amber-200 text-amber-950 font-semibold rounded inline-flex items-center gap-1 cursor-pointer"
+              >
+                <Sparkles className="w-3 h-3" />
+                <span>Reintentar con Gemini IA</span>
+              </button>
             </div>
           )}
 
@@ -1045,15 +1205,21 @@ export const ScannerTab: React.FC<ScannerTabProps> = ({
             {aiScore !== null && (
               <span
                 className={`px-2 py-0.5 rounded font-mono font-semibold tabular-nums border ${
-                  aiEngineUsed === 'gemini' && aiMathVerified
+                  (aiEngineUsed === 'gemini' || aiEngineUsed === 'ocr-verified') && aiMathVerified
                     ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
                     : 'bg-amber-50 text-amber-800 border-amber-200'
                 }`}
               >
-                {aiEngineUsed === 'gemini'
-                  ? `Lectura IA: ${Math.round(aiScore * 100)}% ${
-                      aiMathVerified ? 'Verificada' : 'Revisar'
-                    }${secondPassTriggered ? ' (2 pasadas)' : ''}`
+                {aiEngineUsed === 'ocr-verified'
+                  ? `${qrVerifiedScan ? 'QR SUNAT + OCR' : 'OCR Verificado'}: ${Math.round(
+                      aiScore * 100
+                    )}%`
+                  : aiEngineUsed === 'gemini'
+                  ? `IA Verificada: ${Math.round(aiScore * 100)}%${
+                      escalatedFromPct !== undefined ? ` (Escalado ${escalatedFromPct}%)` : ''
+                    }${aiMathVerified ? '' : ' · Revisar'}${
+                      secondPassTriggered ? ' (2 pasadas)' : ''
+                    }`
                   : `OCR Offline: ${Math.round(aiScore * 100)}%`}
               </span>
             )}

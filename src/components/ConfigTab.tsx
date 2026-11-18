@@ -50,6 +50,7 @@ import {
   getStoredGeminiApiKey,
   saveStoredGeminiApiKey,
   testGeminiApiKeyConnection,
+  type GeminiApiHealthStatus,
 } from '../utils/geminiVision';
 
 interface ConfigTabProps {
@@ -58,6 +59,8 @@ interface ConfigTabProps {
   criteria: ExpenseCriterion[];
   expenses: ExpenseRecord[];
   sedes: SedeRecord[];
+  geminiHealth?: GeminiApiHealthStatus;
+  onGeminiHealthUpdated?: () => void;
   onCriterionMoved: (
     idCriterio: string,
     nuevaNaturaleza: NaturalezaGasto,
@@ -79,6 +82,8 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({
   criteria,
   expenses,
   sedes,
+  geminiHealth,
+  onGeminiHealthUpdated,
   onCriterionMoved,
   onCriterionSaved,
   onCriterionRemoved,
@@ -745,21 +750,40 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({
               </p>
             </div>
           </div>
-          <span
-            className={`px-2.5 py-1 text-[11px] font-semibold rounded border ${
-              geminiEffective.apiKey
-                ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
-                : 'bg-amber-50 text-amber-800 border-amber-200'
-            }`}
-          >
-            {geminiEffective.source === 'localStorage'
-              ? 'Clave personalizada activa'
-              : geminiEffective.source === 'env'
-              ? 'Activa (VITE_GEMINI_API_KEY)'
-              : geminiEffective.source === 'server'
-              ? 'Activa (Servidor • Hoja API!A1)'
-              : 'Pendiente en Servidor (API!A1)'}
-          </span>
+          <div className="flex flex-wrap items-center gap-2">
+            {geminiHealth && (
+              <span
+                className={`px-2.5 py-1 text-[11px] font-semibold rounded border ${
+                  geminiHealth.status === 'connected'
+                    ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                    : geminiHealth.status === 'error'
+                    ? 'bg-red-50 text-red-800 border-red-200'
+                    : 'bg-amber-50 text-amber-800 border-amber-200'
+                }`}
+              >
+                {geminiHealth.status === 'connected'
+                  ? `Conectada · ${geminiHealth.model || 'Gemini Flash'}`
+                  : geminiHealth.status === 'error'
+                  ? 'Error de conexión IA'
+                  : 'Sin clave activa'}
+              </span>
+            )}
+            <span
+              className={`px-2.5 py-1 text-[11px] font-semibold rounded border ${
+                geminiEffective.apiKey
+                  ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                  : 'bg-amber-50 text-amber-800 border-amber-200'
+              }`}
+            >
+              {geminiEffective.source === 'localStorage'
+                ? 'Fuente: Clave personalizada local'
+                : geminiEffective.source === 'env'
+                ? 'Fuente: VITE_GEMINI_API_KEY'
+                : geminiEffective.source === 'server'
+                ? 'Fuente: Servidor (Hoja API!A1)'
+                : 'Pendiente en Servidor (API!A1)'}
+            </span>
+          </div>
         </div>
 
         <div className="flex flex-col gap-2.5">
@@ -788,6 +812,7 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({
                 saveStoredGeminiApiKey(geminiKeyInput);
                 const next = getEffectiveGeminiApiKey();
                 setGeminiEffective(next);
+                onGeminiHealthUpdated?.();
                 setGeminiStatusMsg(
                   next.apiKey
                     ? {
@@ -815,6 +840,7 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({
                   saveStoredGeminiApiKey(geminiKeyInput.trim());
                   setGeminiEffective(getEffectiveGeminiApiKey());
                 }
+                onGeminiHealthUpdated?.();
               }}
               className="px-3.5 py-2 bg-white hover:bg-slate-50 border border-slate-300 text-slate-800 text-xs font-semibold rounded-lg flex items-center gap-1.5 cursor-pointer disabled:opacity-60"
             >
@@ -834,6 +860,7 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({
                 const fetched = await fetchGeminiApiKeyFromServer();
                 setSyncingGeminiServer(false);
                 setGeminiEffective(getEffectiveGeminiApiKey());
+                onGeminiHealthUpdated?.();
                 setGeminiStatusMsg(
                   fetched
                     ? {
@@ -860,20 +887,47 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({
                   clearStoredGeminiApiKey();
                   setGeminiKeyInput('');
                   setGeminiEffective(getEffectiveGeminiApiKey());
+                  onGeminiHealthUpdated?.();
                   setGeminiStatusMsg({
                     type: 'ok',
-                    text: 'Clave eliminada del almacenamiento local.',
+                    text: 'Clave local eliminada. Ahora se usará la clave de la Hoja API!A1 del Servidor.',
                   });
                 }}
                 aria-label="Borrar Gemini API Key"
                 className="px-2.5 py-2 text-xs text-red-700 hover:bg-red-50 border border-red-200 rounded-lg flex items-center gap-1 cursor-pointer"
               >
                 <Trash2 className="w-3.5 h-3.5" />
-                <span>Borrar</span>
+                <span>Usar Hoja API!A1</span>
               </button>
             )}
           </div>
         </div>
+
+        {geminiHealth?.isProxyRestricted && (
+          <div
+            role="alert"
+            className="p-3 rounded-lg border bg-amber-50 border-amber-300 text-xs text-amber-950 flex flex-wrap items-center justify-between gap-2"
+          >
+            <span>
+              <strong>Clave bloqueada en navegador (PROXY_GENERATION_DISABLED):</strong>{' '}
+              Si guardaste una clave antigua en este navegador, bórrala para volver a la clave del Servidor (Hoja <code>API!A1</code>) o pega una clave <code>AIzaSy...</code> de Google AI Studio.
+            </span>
+            {geminiEffective.source === 'localStorage' && (
+              <button
+                type="button"
+                onClick={() => {
+                  clearStoredGeminiApiKey();
+                  setGeminiKeyInput('');
+                  setGeminiEffective(getEffectiveGeminiApiKey());
+                  onGeminiHealthUpdated?.();
+                }}
+                className="px-2.5 py-1 bg-amber-200 hover:bg-amber-300 text-amber-950 font-semibold rounded cursor-pointer shrink-0"
+              >
+                Usar clave del Servidor (API!A1)
+              </button>
+            )}
+          </div>
+        )}
 
         {geminiStatusMsg && (
           <div

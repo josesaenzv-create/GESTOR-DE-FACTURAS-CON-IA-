@@ -1,0 +1,12 @@
+{
+  "name": "CREDIBAN PERÚ - Gestor de Gastos y Facturas",
+  "short_name": "CREDIBAN Gastos",
+  "description": "Control corporativo de gastos, escáner QR/OCR offline y Gemini IA para CREDIBAN PERU S.A.C.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#0f291e",
+  "theme_color": "#1B4332",
+  "lang": "es-PE",
+  "icons": []
+}

@@ -8,12 +8,25 @@ import {
 } from '../types/crediban';
 import { calculateIgvBreakdown, round2 } from './accounting';
 
+import { parseMontoEnLetrasPeru as parseMontoEnLetrasPeruCore } from './invoiceValidator';
+
 export const GEMINI_API_KEY_STORAGE_KEY = 'crediban_gemini_api_key';
 export const SERVER_GEMINI_API_KEY_STORAGE_KEY = 'crediban_server_gemini_api_key';
-export const GEMINI_MODEL_ID = 'gemini-flash-latest';
-export const GEMINI_FALLBACK_MODEL_ID = 'gemini-3.8-flash';
-export const GEMINI_ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL_ID}:generateContent`;
-export const GEMINI_FALLBACK_ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_FALLBACK_MODEL_ID}:generateContent`;
+export const GEMINI_MODEL_ID = 'gemini-flash-lite-latest';
+export const GEMINI_FALLBACK_MODEL_ID = 'gemini-3-flash-preview';
+export const GEMINI_CANDIDATE_MODELS = [
+  'gemini-flash-lite-latest',
+  'gemini-3-flash-preview',
+  'gemini-flash-latest',
+  'gemini-3.8-flash',
+] as const;
+
+export function buildGeminiEndpoint(modelId: string): string {
+  return `https://generativelanguage.googleapis.com/v1beta/models/${modelId}:generateContent`;
+}
+
+export const GEMINI_ENDPOINT = buildGeminiEndpoint(GEMINI_MODEL_ID);
+export const GEMINI_FALLBACK_ENDPOINT = buildGeminiEndpoint(GEMINI_FALLBACK_MODEL_ID);
 
 export const GEMINI_MATH_ALERT_TEXT =
   '⚠️ Verifica el monto: Subtotal + IGV o el texto "SON..." no coincide exactamente con el Total';
@@ -210,93 +223,6 @@ export function clearStoredGeminiApiKey(): void {
   saveStoredGeminiApiKey('');
 }
 
-const SPANISH_UNITS: Record<string, number> = {
-  CERO: 0,
-  UN: 1,
-  UNO: 1,
-  UNA: 1,
-  DOS: 2,
-  TRES: 3,
-  CUATRO: 4,
-  CINCO: 5,
-  SEIS: 6,
-  SIETE: 7,
-  OCHO: 8,
-  NUEVE: 9,
-  DIEZ: 10,
-  ONCE: 11,
-  DOCE: 12,
-  TRECE: 13,
-  CATORCE: 14,
-  QUINCE: 15,
-  DIECISEIS: 16,
-  DIECISIETE: 17,
-  DIECIOCHO: 18,
-  DIECINUEVE: 19,
-  VEINTE: 20,
-  VEINTIUN: 21,
-  VEINTIUNO: 21,
-  VEINTIUNA: 21,
-  VEINTIDOS: 22,
-  VEINTITRES: 23,
-  VEINTICUATRO: 24,
-  VEINTICINCO: 25,
-  VEINTISEIS: 26,
-  VEINTISIETE: 27,
-  VEINTIOCHO: 28,
-  VEINTINUEVE: 29,
-  TREINTA: 30,
-  CUARENTA: 40,
-  CINCUENTA: 50,
-  SESENTA: 60,
-  SETENTA: 70,
-  OCHENTA: 80,
-  NOVENTA: 90,
-  CIEN: 100,
-  CIENTO: 100,
-  DOSCIENTOS: 200,
-  DOSCIENTAS: 200,
-  TRESCIENTOS: 300,
-  TRESCIENTAS: 300,
-  CUATROCIENTOS: 400,
-  CUATROCIENTAS: 400,
-  QUINIENTOS: 500,
-  QUINIENTAS: 500,
-  SEISCIENTOS: 600,
-  SEISCIENTAS: 600,
-  SETECIENTOS: 700,
-  SETECIENTAS: 700,
-  OCHOCIENTOS: 800,
-  OCHOCIENTAS: 800,
-  NOVECIENTOS: 900,
-  NOVECIENTAS: 900,
-};
-
-function stripAccents(str: string): string {
-  return str.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-}
-
-function parseSpanishUnder1000Words(phrase: string): number | null {
-  const tokens = stripAccents(phrase)
-    .toUpperCase()
-    .replace(/[^A-Z\s]/g, ' ')
-    .split(/\s+/)
-    .filter((t) => t && t !== 'Y');
-  if (tokens.length === 0) return null;
-
-  let total = 0;
-  let recognized = false;
-  for (const tok of tokens) {
-    if (SPANISH_UNITS[tok] !== undefined) {
-      total += SPANISH_UNITS[tok];
-      recognized = true;
-    } else {
-      return null;
-    }
-  }
-  return recognized ? total : null;
-}
-
 /**
  * Parses Peruvian receipt "SON: ..." amount-in-words lines such as:
  * "UN CON 80/100 SOLES" -> 1.80
@@ -304,55 +230,7 @@ function parseSpanishUnder1000Words(phrase: string): number | null {
  * "MIL DOSCIENTOS CUARENTA CON 00/100 SOLES" -> 1240.00
  */
 export function parseMontoEnLetrasPeru(raw: string | null | undefined): number | null {
-  const text = stripAccents(String(raw || ''))
-    .toUpperCase()
-    .replace(/^SON\s*:\s*/i, '')
-    .trim();
-  if (!text) return null;
-
-  const centMatch = text.match(/\b(\d{1,2})\s*\/\s*100\b/);
-  if (!centMatch) return null;
-  const cents = parseInt(centMatch[1], 10);
-  if (Number.isNaN(cents) || cents < 0 || cents > 99) return null;
-
-  const beforeCents = text
-    .slice(0, centMatch.index)
-    .replace(/\b(?:CON|Y\s+CON|SOLES|NUEVOS\s+SOLES|S\/)\b\s*$/i, '')
-    .replace(/\bCON\s*$/i, '')
-    .trim();
-
-  if (!beforeCents) {
-    return round2(cents / 100);
-  }
-
-  // Handle MIL (thousands)
-  const milParts = beforeCents.split(/\bMIL\b/);
-  let integerPart = 0;
-
-  if (milParts.length === 2) {
-    const thousandsText = milParts[0].trim();
-    const remainderText = milParts[1].trim();
-    let thousands = 1;
-    if (thousandsText) {
-      const parsedThousands = parseSpanishUnder1000Words(thousandsText);
-      if (parsedThousands === null) return null;
-      thousands = parsedThousands;
-    }
-    integerPart += thousands * 1000;
-    if (remainderText) {
-      const parsedRem = parseSpanishUnder1000Words(remainderText);
-      if (parsedRem === null) return null;
-      integerPart += parsedRem;
-    }
-  } else if (milParts.length === 1) {
-    const parsed = parseSpanishUnder1000Words(milParts[0]);
-    if (parsed === null) return null;
-    integerPart = parsed;
-  } else {
-    return null;
-  }
-
-  return round2(integerPart + cents / 100);
+  return parseMontoEnLetrasPeruCore(raw);
 }
 
 function normalizeGeminiDate(raw: string): string {
@@ -859,26 +737,52 @@ async function postToGeminiUrl(
   return { response, rawText, data };
 }
 
+const RETRYABLE_GEMINI_STATUSES = new Set([400, 403, 404, 429, 500, 502, 503, 504]);
+
+function formatGeminiFailureMessage(params: {
+  status: number;
+  apiStatus?: string;
+  exactMessage: string;
+}): string {
+  const { status, apiStatus, exactMessage } = params;
+  const codeLabel = apiStatus ? ` (${status} ${apiStatus})` : ` (${status})`;
+  if (/PROXY_GENERATION_DISABLED/i.test(exactMessage)) {
+    return `Error API Gemini${codeLabel}: ${exactMessage}. Esta clave está bloqueada para llamadas directas desde el navegador. En Configuración presiona "Borrar" para usar la clave de la Hoja API!A1 del Servidor o pega una clave AIzaSy... de Google AI Studio.`;
+  }
+  return `Error API Gemini${codeLabel}: ${exactMessage}`;
+}
+
 async function callGeminiEndpoint(
   apiKey: string,
   payload: Record<string, unknown>,
-  timeoutMs = 40000
+  timeoutMs = 18000
 ): Promise<GeminiRawReceiptJson> {
-  let attempt = await postToGeminiUrl(GEMINI_ENDPOINT, apiKey, payload, timeoutMs);
+  let attempt: { response: Response; rawText: string; data: Record<string, unknown> | null } | null =
+    null;
 
-  // Automatic fallback if primary model is unavailable or experiencing transient 503/429 load spikes
-  if (
-    !attempt.response.ok &&
-    [404, 429, 500, 502, 503, 504].includes(attempt.response.status)
-  ) {
-    attempt = await postToGeminiUrl(GEMINI_FALLBACK_ENDPOINT, apiKey, payload, timeoutMs);
-    if (
-      !attempt.response.ok &&
-      [429, 500, 502, 503, 504].includes(attempt.response.status)
-    ) {
-      await new Promise((resolve) => setTimeout(resolve, 1200));
-      attempt = await postToGeminiUrl(GEMINI_ENDPOINT, apiKey, payload, timeoutMs);
+  for (let i = 0; i < GEMINI_CANDIDATE_MODELS.length; i++) {
+    const modelId = GEMINI_CANDIDATE_MODELS[i];
+    attempt = await postToGeminiUrl(buildGeminiEndpoint(modelId), apiKey, payload, timeoutMs);
+    if (attempt.response.ok) break;
+    if (!RETRYABLE_GEMINI_STATUSES.has(attempt.response.status)) break;
+    if (i < GEMINI_CANDIDATE_MODELS.length - 1) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
     }
+  }
+
+  // Final single retry on secondary model if primary endpoints hit transient 503 overload
+  if (attempt && !attempt.response.ok && [429, 500, 502, 503, 504].includes(attempt.response.status)) {
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+    attempt = await postToGeminiUrl(
+      buildGeminiEndpoint(GEMINI_FALLBACK_MODEL_ID),
+      apiKey,
+      payload,
+      timeoutMs
+    );
+  }
+
+  if (!attempt) {
+    throw new GeminiApiError('No se pudo conectar con ningún modelo de Gemini.');
   }
 
   const { response, rawText, data } = attempt;
@@ -893,12 +797,18 @@ async function callGeminiEndpoint(
       errObj.message ||
       rawText.slice(0, 300) ||
       `HTTP ${response.status} ${response.statusText}`;
-    const codeLabel = errObj.status ? ` (${response.status} ${errObj.status})` : ` (${response.status})`;
-    throw new GeminiApiError(`Error API Gemini${codeLabel}: ${exactMessage}`, {
-      status: response.status,
-      apiCode: errObj.status,
-      isNetworkError: false,
-    });
+    throw new GeminiApiError(
+      formatGeminiFailureMessage({
+        status: response.status,
+        apiStatus: errObj.status,
+        exactMessage,
+      }),
+      {
+        status: response.status,
+        apiCode: errObj.status,
+        isNetworkError: false,
+      }
+    );
   }
 
   const candidates = (data?.candidates || []) as Array<{
@@ -1019,9 +929,16 @@ export async function scanReceiptWithGemini(params: {
   }
 }
 
+export interface GeminiApiHealthStatus {
+  status: 'connected' | 'missing' | 'error';
+  model?: string;
+  message: string;
+  isProxyRestricted?: boolean;
+}
+
 export async function testGeminiApiKeyConnection(
   apiKey: string
-): Promise<{ ok: boolean; message: string }> {
+): Promise<{ ok: boolean; message: string; model?: string; isProxyRestricted?: boolean }> {
   const cleanKey = apiKey.trim();
   if (!cleanKey) {
     return { ok: false, message: 'Ingresa una Gemini API Key primero.' };
@@ -1032,31 +949,47 @@ export async function testGeminiApiKeyConnection(
       contents: [{ parts: [{ text: 'Responde únicamente: OK' }] }],
       generationConfig: {
         temperature: 0.0,
-        maxOutputTokens: 16,
+        maxOutputTokens: 256,
       },
     };
-    let attempt = await postToGeminiUrl(GEMINI_ENDPOINT, cleanKey, testPayload, 15000);
-    let activeModel = GEMINI_MODEL_ID;
-    if (!attempt.response.ok && attempt.response.status === 404) {
-      attempt = await postToGeminiUrl(GEMINI_FALLBACK_ENDPOINT, cleanKey, testPayload, 15000);
-      activeModel = GEMINI_FALLBACK_MODEL_ID;
+
+    let lastAttempt: {
+      response: Response;
+      rawText: string;
+      data: Record<string, unknown> | null;
+    } | null = null;
+    let activeModel: string = GEMINI_MODEL_ID;
+
+    for (const modelId of GEMINI_CANDIDATE_MODELS) {
+      activeModel = modelId;
+      lastAttempt = await postToGeminiUrl(buildGeminiEndpoint(modelId), cleanKey, testPayload, 12000);
+      if (lastAttempt.response.ok) {
+        return {
+          ok: true,
+          model: activeModel,
+          message: `Conexión exitosa con ${activeModel}. El escáner IA de alta precisión está listo.`,
+        };
+      }
+      if (!RETRYABLE_GEMINI_STATUSES.has(lastAttempt.response.status)) {
+        break;
+      }
     }
 
-    const { response: res, rawText: raw, data: parsed } = attempt;
-
-    if (!res.ok) {
-      const errObj = (parsed?.error || {}) as { message?: string; status?: string };
-      return {
-        ok: false,
-        message: `Error API Gemini (${res.status}${errObj.status ? ` ${errObj.status}` : ''}): ${
-          errObj.message || raw.slice(0, 200) || res.statusText
-        }`,
-      };
-    }
+    const res = lastAttempt?.response;
+    const raw = lastAttempt?.rawText || '';
+    const parsed = lastAttempt?.data || null;
+    const errObj = (parsed?.error || {}) as { message?: string; status?: string };
+    const exactMsg = errObj.message || raw.slice(0, 200) || res?.statusText || 'Error desconocido';
+    const isProxyRestricted = /PROXY_GENERATION_DISABLED/i.test(exactMsg);
 
     return {
-      ok: true,
-      message: `Conexión exitosa con ${activeModel}. El escáner IA de alta precisión está listo.`,
+      ok: false,
+      isProxyRestricted,
+      message: formatGeminiFailureMessage({
+        status: res?.status || 400,
+        apiStatus: errObj.status,
+        exactMessage: exactMsg,
+      }),
     };
   } catch (err) {
     return {
@@ -1066,4 +999,27 @@ export async function testGeminiApiKeyConnection(
       }`,
     };
   }
+}
+
+export async function checkGeminiApiHealth(apiKey: string): Promise<GeminiApiHealthStatus> {
+  const clean = String(apiKey || '').trim();
+  if (!clean) {
+    return {
+      status: 'missing',
+      message: 'Sin Gemini API Key (se usará QR + OCR offline; configura API!A1 o clave en Config)',
+    };
+  }
+  const probe = await testGeminiApiKeyConnection(clean);
+  if (probe.ok) {
+    return {
+      status: 'connected',
+      model: probe.model,
+      message: probe.message,
+    };
+  }
+  return {
+    status: 'error',
+    message: probe.message,
+    isProxyRestricted: probe.isProxyRestricted,
+  };
 }
