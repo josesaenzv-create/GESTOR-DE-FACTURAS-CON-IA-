@@ -169,6 +169,14 @@ export interface AiScanResult {
   subtipo: string;
   descripcion: string;
   scoreConfiabilidad: number;
+  confianzaLectura?: number;
+  transcripcionCabecera?: string;
+  transcripcionTotales?: string;
+  razonamientoAuditoria?: string;
+  montoEnLetras?: string;
+  secondPassTriggered?: boolean;
+  mathVerified?: boolean;
+  mathAlert?: string;
 }
 
 export interface GpsLocationState {

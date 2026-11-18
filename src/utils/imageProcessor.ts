@@ -210,8 +210,16 @@ export async function processEditedInvoiceImage(
   const img = await loadImageFromSrc(originalDataUrl);
   // Maximum HD quality for storage & printing (up to 2800px at 97% JPEG quality)
   const hd = renderEditedToCanvas(img, edits, 2800, 0.97);
-  // High-clarity 1400px image for OCR / AI Vision accuracy on thin thermal receipts
-  const ia = renderEditedToCanvas(img, edits, 1400, 0.9);
+  // High-precision 2048px image at 0.92 JPEG for Gemini Vision:
+  // Preserves rotation and crop ONLY — NEVER applies hard B/W binarization or destructive filters
+  // that could erase small decimal points (e.g. turning 1.80 into 180).
+  const iaEdits: ImageEditSettings = {
+    ...edits,
+    filterMode: 'original',
+    brightness: 100,
+    contrast: 100,
+  };
+  const ia = renderEditedToCanvas(img, iaEdits, 2048, 0.92);
 
   return {
     originalDataUrl,
@@ -224,8 +232,42 @@ export async function processEditedInvoiceImage(
   };
 }
 
+/**
+ * Normalizes EXIF camera orientation from mobile phones into an upright data URL
+ * using createImageBitmap (which respects EXIF 'from-image' orientation without double-rotating),
+ * falling back cleanly to FileReader if unavailable.
+ */
+async function normalizeExifFileToDataUrl(file: File): Promise<string> {
+  if (typeof createImageBitmap === 'function' && typeof document !== 'undefined') {
+    try {
+      const bitmap = await createImageBitmap(file);
+      const maxInitial = 2800;
+      const ratio = Math.min(1, maxInitial / Math.max(bitmap.width, bitmap.height));
+      const w = Math.max(1, Math.round(bitmap.width * ratio));
+      const h = Math.max(1, Math.round(bitmap.height * ratio));
+      const canvas = document.createElement('canvas');
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, w, h);
+        ctx.drawImage(bitmap, 0, 0, w, h);
+        bitmap.close?.();
+        return canvas.toDataURL('image/jpeg', 0.95);
+      }
+      bitmap.close?.();
+    } catch {
+      // Fallback to standard FileReader below
+    }
+  }
+  return readFileAsDataUrl(file);
+}
+
 export async function processInvoiceImageFile(file: File): Promise<ProcessedInvoiceImages> {
-  const dataUrl = await readFileAsDataUrl(file);
+  const dataUrl = await normalizeExifFileToDataUrl(file);
   return processEditedInvoiceImage(dataUrl, DEFAULT_IMAGE_EDITS);
 }
 

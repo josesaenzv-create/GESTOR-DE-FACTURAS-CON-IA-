@@ -30,6 +30,11 @@ import {
   calculateSalesIgvBreakdown,
   type MonthlySalesEntry,
 } from '../utils/analytics';
+import {
+  GeminiApiError,
+  getEffectiveGeminiApiKey,
+  scanReceiptWithGemini,
+} from '../utils/geminiVision';
 
 export interface BackendBundle {
   expenses: ExpenseRecord[];
@@ -1391,42 +1396,33 @@ export async function scanInvoiceWithGeminiApi(params: {
   mimeType: string;
   criteria: ExpenseCriterion[];
   expectedTipo?: TipoComprobante;
+  forceOfflineOcr?: boolean;
   onProgress?: (pct: number, step: string) => void;
 }): Promise<{ result: AiScanResult; engine: 'gemini' | 'ocr-local' }> {
   const notify = params.onProgress;
 
-  // 1. Try server-side Gemini Vision API first (safely checking JSON content-type to avoid <!doctype errors)
-  try {
-    notify?.(18, 'Consultando motor de lectura inteligente...');
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 16000);
-    const res = await fetch('/api/scan-invoice', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        imageBase64: params.imageBase64,
-        mimeType: params.mimeType,
-        criteria: params.criteria,
-        expectedTipo: params.expectedTipo,
-      }),
-      signal: controller.signal,
-    });
-    clearTimeout(timeout);
-
-    const contentType = res.headers.get('content-type') || '';
-    if (res.ok && contentType.includes('application/json')) {
-      const data = await res.json();
-      if (data?.result) {
-        notify?.(100, 'Lectura IA completada.');
-        return { result: data.result as AiScanResult, engine: 'gemini' };
-      }
+  // 1. Primary Engine: 100% Client-Side Gemini 2.5 Flash (works natively on GitHub Pages static hosting)
+  if (!params.forceOfflineOcr) {
+    const { apiKey } = getEffectiveGeminiApiKey();
+    if (!apiKey) {
+      throw new GeminiApiError(
+        'Falta configurar una Gemini API Key gratuita. Configúrala arriba en el Escáner o en la pestaña Configuración.'
+      );
     }
-  } catch {
-    // Server route unavailable (e.g. GitHub Pages static deploy) -> use free local OCR below
+
+    const result = await scanReceiptWithGemini({
+      apiKey,
+      imageBase64: params.imageBase64,
+      mimeType: params.mimeType,
+      criteria: params.criteria,
+      expectedTipo: params.expectedTipo,
+      onProgress: notify,
+    });
+    return { result, engine: 'gemini' };
   }
 
-  // 2. Free zero-API-key client-side OCR fallback using Tesseract.js
-  notify?.(28, 'Iniciando motor OCR gratuito sin clave...');
+  // 2. Explicit Manual Emergency Offline Fallback: Tesseract.js (never triggered silently)
+  notify?.(24, 'Iniciando OCR de emergencia sin internet (Tesseract)...');
   const { createWorker } = await import('tesseract.js');
   const dataUrl =
     params.imageDataUrl || `data:${params.mimeType || 'image/jpeg'};base64,${params.imageBase64}`;
@@ -1436,27 +1432,27 @@ export async function scanInvoiceWithGeminiApi(params: {
       const status = String(m?.status || '').toLowerCase();
       const rawProgress = typeof m?.progress === 'number' ? m.progress : 0;
       if (status.includes('loading tesseract core')) {
-        notify?.(34, 'Cargando núcleo OCR en memoria...');
+        notify?.(32, 'Cargando núcleo OCR offline en memoria...');
       } else if (status.includes('initializing tesseract')) {
-        notify?.(42, 'Inicializando lector de caracteres...');
+        notify?.(42, 'Inicializando lector de emergencia...');
       } else if (status.includes('loading language traineddata')) {
         notify?.(Math.min(58, Math.round(44 + rawProgress * 14)), 'Cargando diccionario español/números...');
       } else if (status.includes('initializing api')) {
-        notify?.(62, 'Preparando análisis de comprobante...');
+        notify?.(62, 'Preparando análisis offline...');
       } else if (status.includes('recognizing text')) {
         const pct = Math.min(92, Math.max(64, Math.round(64 + rawProgress * 28)));
-        notify?.(pct, `Extrayendo RUC, serie, fecha y montos (${pct}%)...`);
+        notify?.(pct, `Extrayendo texto sin internet (${pct}%)...`);
       }
     },
   });
   try {
-    notify?.(60, 'Analizando texto y montos del comprobante...');
+    notify?.(60, 'Analizando texto del comprobante sin internet...');
     const {
       data: { text },
     } = await worker.recognize(dataUrl);
     notify?.(96, 'Clasificando naturaleza contable y campos...');
     const parsed = parsePeruReceiptText(text || '', params.criteria, params.expectedTipo);
-    notify?.(100, 'Lectura completada.');
+    notify?.(100, 'Lectura offline completada.');
     return { result: parsed, engine: 'ocr-local' };
   } finally {
     await worker.terminate();

@@ -17,6 +17,12 @@ import {
   UserX,
   Code2,
   Copy,
+  KeyRound,
+  Eye,
+  EyeOff,
+  PlugZap,
+  Trash2,
+  Loader2,
 } from 'lucide-react';
 import {
   OFFICIAL_CATEGORIES,
@@ -36,6 +42,13 @@ import {
 } from '../services/credibanApi';
 import { isDefaultAuthorizedRole, resolveUserSystemAccess } from '../utils/accounting';
 import { exportExpensesToCsv } from '../utils/searchAndPivot';
+import {
+  clearStoredGeminiApiKey,
+  getEffectiveGeminiApiKey,
+  getStoredGeminiApiKey,
+  saveStoredGeminiApiKey,
+  testGeminiApiKeyConnection,
+} from '../utils/geminiVision';
 
 interface ConfigTabProps {
   user: UserSession;
@@ -107,6 +120,16 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({
   const [savingAccess, setSavingAccess] = useState(false);
   const [showScriptCode, setShowScriptCode] = useState(false);
   const [copiedScript, setCopiedScript] = useState(false);
+
+  // Free Gemini API Key configuration state
+  const [geminiEffective, setGeminiEffective] = useState(() => getEffectiveGeminiApiKey());
+  const [geminiKeyInput, setGeminiKeyInput] = useState(() => getStoredGeminiApiKey());
+  const [showGeminiKey, setShowGeminiKey] = useState(false);
+  const [testingGemini, setTestingGemini] = useState(false);
+  const [geminiStatusMsg, setGeminiStatusMsg] = useState<{
+    type: 'ok' | 'err';
+    text: string;
+  } | null>(null);
 
   const activeCriteria = useMemo(
     () => criteria.filter((c) => c.estado !== 'INACTIVO'),
@@ -703,6 +726,134 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
         {renderColumn('Costo Fijo', groupedByNature.fijos, true)}
         {renderColumn('Costo Variable', groupedByNature.variables, false)}
+      </div>
+
+      {/* Gemini 2.5 Flash Free API Key Configuration */}
+      <div className="bg-white rounded-xl border border-slate-200 p-5 space-y-3.5 no-print">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <KeyRound className="w-4 h-4 text-[#1B4332]" />
+            <div>
+              <h3 className="text-sm font-bold text-slate-900">
+                Motor IA Gemini 2.5 Flash (API Key Gratuita)
+              </h3>
+              <p className="text-xs text-slate-500">
+                Lectura de comprobantes de máxima precisión 100% desde el navegador (compatible con GitHub Pages). La clave se guarda únicamente en este dispositivo.
+              </p>
+            </div>
+          </div>
+          <span
+            className={`px-2.5 py-1 text-[11px] font-semibold rounded border ${
+              geminiEffective.apiKey
+                ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                : 'bg-amber-50 text-amber-800 border-amber-200'
+            }`}
+          >
+            {geminiEffective.apiKey
+              ? geminiEffective.source === 'localStorage'
+                ? 'Activa en este navegador'
+                : 'Activa (VITE_GEMINI_API_KEY)'
+              : 'Sin configurar'}
+          </span>
+        </div>
+
+        <div className="flex flex-col sm:flex-row gap-2.5">
+          <div className="relative flex-1">
+            <input
+              type={showGeminiKey ? 'text' : 'password'}
+              aria-label="Gemini API Key Gratuita"
+              value={geminiKeyInput}
+              onChange={(e) => setGeminiKeyInput(e.target.value)}
+              placeholder="AIzaSy... (obtén una gratis en aistudio.google.com/apikey)"
+              className="w-full pr-9 pl-3 py-2 text-xs font-mono bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1B4332]/25"
+            />
+            <button
+              type="button"
+              aria-label={showGeminiKey ? 'Ocultar Gemini Key' : 'Mostrar Gemini Key'}
+              onClick={() => setShowGeminiKey((v) => !v)}
+              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700 cursor-pointer"
+            >
+              {showGeminiKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+            </button>
+          </div>
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => {
+                saveStoredGeminiApiKey(geminiKeyInput);
+                const next = getEffectiveGeminiApiKey();
+                setGeminiEffective(next);
+                setGeminiStatusMsg(
+                  next.apiKey
+                    ? {
+                        type: 'ok',
+                        text: 'Gemini API Key guardada correctamente en este navegador.',
+                      }
+                    : { type: 'err', text: 'API Key eliminada.' }
+                );
+              }}
+              className="px-3.5 py-2 bg-[#1B4332] hover:bg-[#0f291e] text-white text-xs font-semibold rounded-lg cursor-pointer"
+            >
+              Guardar API Key
+            </button>
+            <button
+              type="button"
+              disabled={testingGemini}
+              onClick={async () => {
+                const target = geminiKeyInput.trim() || geminiEffective.apiKey;
+                setTestingGemini(true);
+                setGeminiStatusMsg(null);
+                const res = await testGeminiApiKeyConnection(target);
+                setTestingGemini(false);
+                setGeminiStatusMsg({ type: res.ok ? 'ok' : 'err', text: res.message });
+                if (res.ok && geminiKeyInput.trim()) {
+                  saveStoredGeminiApiKey(geminiKeyInput.trim());
+                  setGeminiEffective(getEffectiveGeminiApiKey());
+                }
+              }}
+              className="px-3.5 py-2 bg-white hover:bg-slate-50 border border-slate-300 text-slate-800 text-xs font-semibold rounded-lg flex items-center gap-1.5 cursor-pointer disabled:opacity-60"
+            >
+              {testingGemini ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <PlugZap className="w-3.5 h-3.5 text-[#59B447]" />
+              )}
+              <span>{testingGemini ? 'Probando...' : 'Probar conexión'}</span>
+            </button>
+            {geminiEffective.source === 'localStorage' && (
+              <button
+                type="button"
+                onClick={() => {
+                  clearStoredGeminiApiKey();
+                  setGeminiKeyInput('');
+                  setGeminiEffective(getEffectiveGeminiApiKey());
+                  setGeminiStatusMsg({
+                    type: 'ok',
+                    text: 'Clave eliminada del almacenamiento local.',
+                  });
+                }}
+                aria-label="Borrar Gemini API Key"
+                className="px-2.5 py-2 text-xs text-red-700 hover:bg-red-50 border border-red-200 rounded-lg flex items-center gap-1 cursor-pointer"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>Borrar</span>
+              </button>
+            )}
+          </div>
+        </div>
+
+        {geminiStatusMsg && (
+          <div
+            role="status"
+            className={`p-3 rounded-lg border text-xs font-medium ${
+              geminiStatusMsg.type === 'ok'
+                ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                : 'bg-red-50 border-red-200 text-red-800'
+            }`}
+          >
+            {geminiStatusMsg.text}
+          </div>
+        )}
       </div>
 
       {/* Sedes Management & Receipt Personalization Card */}
